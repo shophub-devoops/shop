@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Compiled Go binary (`go build ./...` in backend/ names it after the dir)
+/backend/backend
+
 # Test binary, built with `go test -c`
 *.test
 
