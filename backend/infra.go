@@ -83,6 +83,13 @@ var (
 		},
 		[]string{"method", "route"},
 	)
+	httpResponseBytes = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "shop_http_response_bytes_total",
+			Help: "Total bytes written in HTTP response bodies, partitioned by method, route and status.",
+		},
+		[]string{"method", "route", "status"},
+	)
 )
 
 func metricsMiddleware() gin.HandlerFunc {
@@ -96,5 +103,11 @@ func metricsMiddleware() gin.HandlerFunc {
 		status := strconv.Itoa(c.Writer.Status())
 		httpRequestsTotal.WithLabelValues(c.Request.Method, route, status).Inc()
 		httpRequestDuration.WithLabelValues(c.Request.Method, route).Observe(time.Since(start).Seconds())
+		// Writer.Size() is -1 until a body is written (e.g. Gin's NoRoute 404
+		// writes its body after this middleware runs). Adding a negative value
+		// panics a Prometheus counter, so only record real, non-negative writes.
+		if size := c.Writer.Size(); size > 0 {
+			httpResponseBytes.WithLabelValues(c.Request.Method, route, status).Add(float64(size))
+		}
 	}
 }
