@@ -2,3 +2,9 @@ node_modules
 dist
 *.local
 .vite
+
+# TypeScript build artifacts emitted by `tsc -b` (composite project mode).
+# Vite consumes vite.config.ts directly — emitted .js/.d.ts are stale noise.
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
