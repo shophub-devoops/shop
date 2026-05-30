@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
 func main() {
@@ -35,6 +36,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	shutdownTracing, err := initTracing(context.Background())
+	if err != nil {
+		slog.Error("init tracing", "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(ctx)
+	}()
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -67,6 +79,7 @@ func buildRouter(pool *pgxpool.Pool) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(otelgin.Middleware(serviceName()))
 	r.Use(requestLogger())
 	r.Use(metricsMiddleware())
 
