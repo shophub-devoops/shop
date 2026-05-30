@@ -63,6 +63,9 @@ func requestLogger() gin.HandlerFunc {
 			"status", c.Writer.Status(),
 			"duration_ms", time.Since(start).Milliseconds(),
 			"client_ip", c.ClientIP(),
+			// user_agent lets Loki count unique visitors as distinct
+			// (client_ip, user_agent) pairs (spec 4.1.d).
+			"user_agent", c.Request.UserAgent(),
 		)
 	}
 }
