@@ -85,14 +85,27 @@ func (p *paymentVerifier) sweep(ctx context.Context) {
 	}
 }
 
-// confirm decrements stock and marks the order confirmed in one transaction so
-// concurrent confirmations can't oversell.
+// confirm marks the order confirmed and decrements stock in one transaction.
+// It first claims the order with a conditional UPDATE: only the transaction
+// that flips it out of 'pending' proceeds to decrement stock, so when several
+// replicas sweep the same order concurrently exactly one of them adjusts stock.
 func (p *paymentVerifier) confirm(ctx context.Context, orderID, itemID string, qty int) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE orders SET status = 'confirmed', verified_at = now()
+		 WHERE id = $1 AND status = 'pending'`, orderID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Another sweep/replica already handled this order.
+		return tx.Commit(ctx)
+	}
 
 	var stock int
 	if err := tx.QueryRow(ctx, `SELECT stock FROM items WHERE id = $1 FOR UPDATE`, itemID).Scan(&stock); err != nil {
@@ -106,10 +119,6 @@ func (p *paymentVerifier) confirm(ctx context.Context, orderID, itemID string, q
 		return tx.Commit(ctx)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE items SET stock = stock - $1 WHERE id = $2`, qty, itemID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE orders SET status = 'confirmed', verified_at = now() WHERE id = $1`, orderID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
