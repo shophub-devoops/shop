@@ -13,7 +13,28 @@ export type Order = {
   buyer_wallet: string;
   tx_hash: string | null;
   amount_usdt: string;
+  status: string;
+  item_id?: string;
+  item_quantity?: number;
   created_at: string;
+};
+
+// ShopInfo carries the on-chain payment parameters the storefront needs to
+// build the USDT transfer (served by GET /api/shop-info).
+export type ShopInfo = {
+  wallet_address: string;
+  token_contract: string;
+  token_decimals: number;
+  chain_id: number;
+};
+
+export type NewOrder = {
+  id: string;
+  buyer_wallet: string;
+  tx_hash: string;
+  amount_usdt: string;
+  item_id: string;
+  item_quantity: number;
 };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -40,4 +61,8 @@ export const api = {
   deleteItem: (id: string) =>
     request<void>(`/api/items/${id}`, { method: 'DELETE' }),
   listOrders: () => request<Order[]>('/api/orders'),
+  getOrder: (id: string) => request<Order>(`/api/orders/${id}`),
+  createOrder: (order: NewOrder) =>
+    request<Order>('/api/orders', { method: 'POST', body: JSON.stringify(order) }),
+  shopInfo: () => request<ShopInfo>('/api/shop-info'),
 };
