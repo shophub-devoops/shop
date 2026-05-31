@@ -49,12 +49,8 @@ func TestMain(m *testing.M) {
 		log.Fatalf("pool: %v", err)
 	}
 
-	schema, err := os.ReadFile("testdata/schema.sql")
-	if err != nil {
-		log.Fatalf("read schema: %v", err)
-	}
-	if _, err := testPool.Exec(ctx, string(schema)); err != nil {
-		log.Fatalf("apply schema: %v", err)
+	if err := ensureSchema(ctx, testPool); err != nil {
+		log.Fatalf("ensure schema: %v", err)
 	}
 
 	code := m.Run()
@@ -94,7 +90,7 @@ func listItemIDs(t *testing.T, r http.Handler) map[string]item {
 }
 
 func TestItemCRUD(t *testing.T) {
-	r := buildRouter(testPool)
+	r := buildRouter(testPool, config{TokenDecimals: 6})
 
 	// Create.
 	create := item{ID: "crud-1", Name: "Widget", Price: "9.99", Stock: 5}
@@ -126,7 +122,7 @@ func TestItemCRUD(t *testing.T) {
 }
 
 func TestUpdateMissingItemReturns404(t *testing.T) {
-	r := buildRouter(testPool)
+	r := buildRouter(testPool, config{TokenDecimals: 6})
 	upd := item{Name: "Ghost", Price: "1.00", Stock: 1}
 	if w := do(r, http.MethodPut, "/api/items/does-not-exist", upd); w.Code != http.StatusNotFound {
 		t.Fatalf("update missing item = %d, want 404", w.Code)
@@ -134,7 +130,7 @@ func TestUpdateMissingItemReturns404(t *testing.T) {
 }
 
 func TestCreateOrderRespectsStock(t *testing.T) {
-	r := buildRouter(testPool)
+	r := buildRouter(testPool, config{TokenDecimals: 6})
 
 	// Seed an item with stock 5.
 	seed := item{ID: "ord-item", Name: "Thing", Price: "2.50", Stock: 5}

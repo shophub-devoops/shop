@@ -37,6 +37,22 @@ func main() {
 	}
 	defer pool.Close()
 
+	if err := ensureSchema(context.Background(), pool); err != nil {
+		slog.Error("ensure schema", "err", err)
+		os.Exit(1)
+	}
+
+	// Web3 payment verifier (D12): a background sweep that confirms pending
+	// orders against Sepolia. Disabled (with a warning) if it can't be wired,
+	// so the API still serves without on-chain config.
+	verifierCtx, stopVerifier := context.WithCancel(context.Background())
+	defer stopVerifier()
+	if v, err := newVerifier(cfg); err != nil {
+		slog.Warn("payment verifier disabled", "err", err)
+	} else {
+		go (&paymentVerifier{pool: pool, v: v, decimals: cfg.TokenDecimals}).run(verifierCtx)
+	}
+
 	shutdownTracing, err := initTracing(context.Background())
 	if err != nil {
 		slog.Error("init tracing", "err", err)
@@ -50,7 +66,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           buildRouter(pool),
+		Handler:           buildRouter(pool, cfg),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -75,7 +91,7 @@ func main() {
 
 // buildRouter wires every HTTP route. Handlers themselves live in items.go and
 // orders.go so this function stays a single source of truth for the API surface.
-func buildRouter(pool *pgxpool.Pool) http.Handler {
+func buildRouter(pool *pgxpool.Pool, cfg config) http.Handler {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -89,6 +105,8 @@ func buildRouter(pool *pgxpool.Pool) http.Handler {
 
 	api := r.Group("/api")
 	{
+		api.GET("/shop-info", shopInfo(cfg))
+
 		items := api.Group("/items")
 		items.GET("", listItems(pool))
 		items.POST("", createItem(pool))
@@ -98,6 +116,7 @@ func buildRouter(pool *pgxpool.Pool) http.Handler {
 		orders := api.Group("/orders")
 		orders.GET("", listOrders(pool))
 		orders.POST("", createOrder(pool))
+		orders.GET("/:id", getOrder(pool))
 	}
 
 	return r

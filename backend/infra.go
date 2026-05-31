@@ -17,6 +17,14 @@ import (
 type config struct {
 	Port        string
 	DatabaseURL string
+
+	// Web3 payment (D12). WalletAddress is this shop's on-chain recipient — the
+	// operator injects it from Shop.spec.walletAddress. Token/RPC default to the
+	// project's Sepolia test setup and can be overridden by env.
+	WalletAddress string
+	RPCURL        string
+	TokenContract string
+	TokenDecimals int
 }
 
 func loadConfig() (config, error) {
@@ -28,7 +36,61 @@ func loadConfig() (config, error) {
 	if port == "" {
 		port = "8080"
 	}
-	return config{Port: port, DatabaseURL: dbURL}, nil
+	cfg := config{
+		Port:          port,
+		DatabaseURL:   dbURL,
+		WalletAddress: os.Getenv("WALLET_ADDRESS"),
+		RPCURL:        envOr("SEPOLIA_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
+		TokenContract: envOr("USDT_CONTRACT", "0x74b0ef872a9f1a4bbb07a01a6b4376379737ff6f"),
+		TokenDecimals: 6,
+	}
+	if d := os.Getenv("USDT_DECIMALS"); d != "" {
+		n, err := strconv.Atoi(d)
+		if err != nil {
+			return config{}, fmt.Errorf("USDT_DECIMALS: %w", err)
+		}
+		cfg.TokenDecimals = n
+	}
+	return cfg, nil
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ensureSchema creates the application tables and adds the D12 payment columns
+// idempotently. The operator seeds base tables via CNPG postInitApplicationSQL
+// only on first bootstrap, so running this on every start lets existing shops
+// pick up new columns in place.
+func ensureSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS items (
+			id text PRIMARY KEY,
+			name text NOT NULL,
+			price_usdt numeric(36,18) NOT NULL,
+			stock int NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE IF NOT EXISTS orders (
+			id text PRIMARY KEY,
+			buyer_wallet text NOT NULL,
+			tx_hash text,
+			amount_usdt numeric(36,18) NOT NULL,
+			created_at timestamptz DEFAULT now()
+		)`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS item_id text`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS item_quantity int`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verified_at timestamptz`,
+	}
+	for _, s := range stmts {
+		if _, err := pool.Exec(ctx, s); err != nil {
+			return fmt.Errorf("ensure schema: %w", err)
+		}
+	}
+	return nil
 }
 
 func openPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
