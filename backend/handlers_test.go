@@ -173,3 +173,40 @@ func TestCreateOrderRespectsStock(t *testing.T) {
 		t.Fatal("created order o1 not in list")
 	}
 }
+
+// TestConfirmIsIdempotent guards the multi-replica payment sweep: confirming the
+// same order more than once must decrement stock exactly once.
+func TestConfirmIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO items (id, name, price_usdt, stock) VALUES ('idem-item','Idem','3'::numeric,5)`); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO orders (id, buyer_wallet, tx_hash, amount_usdt, item_id, item_quantity, status)
+		 VALUES ('idem-order','0xBUY','0xtx','6'::numeric,'idem-item',2,'pending')`); err != nil {
+		t.Fatalf("seed order: %v", err)
+	}
+
+	pv := &paymentVerifier{pool: testPool}
+	for i := 0; i < 3; i++ {
+		if err := pv.confirm(ctx, "idem-order", "idem-item", 2); err != nil {
+			t.Fatalf("confirm #%d: %v", i, err)
+		}
+	}
+
+	var stock int
+	var status string
+	if err := testPool.QueryRow(ctx, `SELECT stock FROM items WHERE id='idem-item'`).Scan(&stock); err != nil {
+		t.Fatal(err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT status FROM orders WHERE id='idem-order'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if stock != 3 {
+		t.Errorf("stock = %d, want 3 (decremented once by 2)", stock)
+	}
+	if status != "confirmed" {
+		t.Errorf("status = %q, want confirmed", status)
+	}
+}
