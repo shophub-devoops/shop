@@ -1,3 +1,32 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Coins streaming from buyer to shop while a USDT payment is in flight. */
+@keyframes coin-flow {
+  0% {
+    left: 0;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    left: 100%;
+    opacity: 0;
+  }
+}
+.coin {
+  position: absolute;
+  top: 50%;
+  height: 8px;
+  width: 8px;
+  margin-top: -4px;
+  border-radius: 9999px;
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+  animation: coin-flow 2.4s linear infinite;
+}
