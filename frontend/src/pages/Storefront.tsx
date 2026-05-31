@@ -2,6 +2,29 @@ import { useEffect, useState } from 'react';
 import { api, type Item } from '../lib/api';
 import { connectWallet, payUSDT } from '../lib/web3';
 
+// PaymentFlow shows the order status, and while the payment is in flight it
+// streams little coins from "You" to "Shop" — a small visual cue that funds are
+// moving on-chain (pure CSS, see index.css .coin).
+function PaymentFlow({ status }: { status: string }) {
+  const inFlight = status.startsWith('Waiting') || status.startsWith('Payment sent');
+  return (
+    <div className="rounded border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+      <div className="flex items-center gap-3">
+        <span className="font-medium text-slate-700">You</span>
+        <div className="relative h-5 flex-1">
+          <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 border-t border-dashed border-slate-300" />
+          {inFlight &&
+            Array.from({ length: 7 }).map((_, i) => (
+              <span key={i} className="coin" style={{ animationDelay: `${i * 0.3}s` }} />
+            ))}
+        </div>
+        <span className="font-medium text-slate-700">Shop</span>
+      </div>
+      <p className="mt-2 text-slate-600">{status}</p>
+    </div>
+  );
+}
+
 export default function Storefront() {
   const [items, setItems] = useState<Item[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -93,9 +116,7 @@ export default function Storefront() {
       </div>
 
       {error && <p className="text-red-600">{error}</p>}
-      {status && (
-        <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-sm">{status}</p>
-      )}
+      {status && <PaymentFlow status={status} />}
 
       <ul className="grid gap-3 sm:grid-cols-2">
         {items.map((item) => (
