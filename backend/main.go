@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -119,7 +121,29 @@ func buildRouter(pool *pgxpool.Pool, cfg config) http.Handler {
 		orders.GET("/:id", getOrder(pool))
 	}
 
+	mountStorefront(r)
 	return r
+}
+
+// mountStorefront serves the built frontend SPA from WEB_DIR (populated in the
+// unified container image) so the shop is a real storefront at "/", not just an
+// API. No-op when no bundled UI is present (local API-only runs / tests).
+func mountStorefront(r *gin.Engine) {
+	webDir := envOr("WEB_DIR", "/app/web")
+	index := filepath.Join(webDir, "index.html")
+	if _, err := os.Stat(index); err != nil {
+		return
+	}
+	r.Static("/assets", filepath.Join(webDir, "assets"))
+	r.NoRoute(func(c *gin.Context) {
+		p := c.Request.URL.Path
+		if c.Request.Method != http.MethodGet ||
+			strings.HasPrefix(p, "/api") || strings.HasPrefix(p, "/metrics") || strings.HasPrefix(p, "/probe") {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.File(index)
+	})
 }
 
 // readinessHandler reports ready only when the pool can answer a Ping. Liveness
