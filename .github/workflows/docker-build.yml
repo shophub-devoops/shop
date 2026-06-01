@@ -15,7 +15,7 @@ jobs:
       - name: Lint Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:
-          dockerfile: backend/Dockerfile
+          dockerfile: Dockerfile
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -23,8 +23,8 @@ jobs:
       - name: Build (no push)
         uses: docker/build-push-action@v6
         with:
-          context: backend
-          file: backend/Dockerfile
+          context: .
+          file: Dockerfile
           push: false
           tags: shop-backend:pr-${{ github.event.pull_request.number || github.sha }}
           cache-from: type=gha

@@ -1,0 +1,9 @@
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+backend/coverage.out
+backend/cover.out
+frontend/vite.config.js
+frontend/vite.config.d.ts
+render*.png
+.git
