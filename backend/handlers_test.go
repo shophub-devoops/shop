@@ -18,10 +18,13 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// testPool talks to a throwaway Postgres started once for the package
-// (Testcontainers — spec 5.2 integration-test infrastructure). The schema is
-// the same testdata/schema.sql the operator bootstraps in production.
-var testPool *pgxpool.Pool
+// testStore is a Postgres-backed Store over a throwaway Postgres started once
+// for the package (Testcontainers — spec 5.2 integration-test infrastructure).
+// testPool is the same connection, kept for raw SQL seeding in tests.
+var (
+	testStore Store
+	testPool  *pgxpool.Pool
+)
 
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
@@ -44,18 +47,20 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("conn string: %v", err)
 	}
-	testPool, err = pgxpool.New(ctx, dsn)
+	store, err := newPostgresStore(ctx, dsn)
 	if err != nil {
-		log.Fatalf("pool: %v", err)
+		log.Fatalf("store: %v", err)
 	}
+	testStore = store
+	testPool = store.pool
 
-	if err := ensureSchema(ctx, testPool); err != nil {
+	if err := testStore.EnsureSchema(ctx); err != nil {
 		log.Fatalf("ensure schema: %v", err)
 	}
 
 	code := m.Run()
 
-	testPool.Close()
+	testStore.Close()
 	_ = pg.Terminate(ctx)
 	os.Exit(code)
 }
@@ -90,7 +95,7 @@ func listItemIDs(t *testing.T, r http.Handler) map[string]item {
 }
 
 func TestItemCRUD(t *testing.T) {
-	r := buildRouter(testPool, config{TokenDecimals: 6})
+	r := buildRouter(testStore, config{TokenDecimals: 6})
 
 	// Create.
 	create := item{ID: "crud-1", Name: "Widget", Price: "9.99", Stock: 5}
@@ -122,7 +127,7 @@ func TestItemCRUD(t *testing.T) {
 }
 
 func TestUpdateMissingItemReturns404(t *testing.T) {
-	r := buildRouter(testPool, config{TokenDecimals: 6})
+	r := buildRouter(testStore, config{TokenDecimals: 6})
 	upd := item{Name: "Ghost", Price: "1.00", Stock: 1}
 	if w := do(r, http.MethodPut, "/api/items/does-not-exist", upd); w.Code != http.StatusNotFound {
 		t.Fatalf("update missing item = %d, want 404", w.Code)
@@ -130,7 +135,7 @@ func TestUpdateMissingItemReturns404(t *testing.T) {
 }
 
 func TestCreateOrderRespectsStock(t *testing.T) {
-	r := buildRouter(testPool, config{TokenDecimals: 6})
+	r := buildRouter(testStore, config{TokenDecimals: 6})
 
 	// Seed an item with stock 5.
 	seed := item{ID: "ord-item", Name: "Thing", Price: "2.50", Stock: 5}
@@ -188,9 +193,8 @@ func TestConfirmIsIdempotent(t *testing.T) {
 		t.Fatalf("seed order: %v", err)
 	}
 
-	pv := &paymentVerifier{pool: testPool}
 	for i := 0; i < 3; i++ {
-		if err := pv.confirm(ctx, "idem-order", "idem-item", 2); err != nil {
+		if err := testStore.ConfirmOrder(ctx, "idem-order", "idem-item", 2); err != nil {
 			t.Fatalf("confirm #%d: %v", i, err)
 		}
 	}

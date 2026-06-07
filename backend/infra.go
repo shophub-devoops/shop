@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -17,6 +15,9 @@ import (
 type config struct {
 	Port        string
 	DatabaseURL string
+	// DBName is the database the Mongo client uses (operator injects SHOP_DB_NAME
+	// = shop name). Ignored by Postgres, whose URI already names the database.
+	DBName string
 
 	// Web3 payment (D12). WalletAddress is this shop's on-chain recipient — the
 	// operator injects it from Shop.spec.walletAddress. Token/RPC default to the
@@ -39,6 +40,7 @@ func loadConfig() (config, error) {
 	cfg := config{
 		Port:          port,
 		DatabaseURL:   dbURL,
+		DBName:        os.Getenv("SHOP_DB_NAME"),
 		WalletAddress: os.Getenv("WALLET_ADDRESS"),
 		RPCURL:        envOr("SEPOLIA_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
 		TokenContract: envOr("USDT_CONTRACT", "0x74b0ef872a9f1a4bbb07a01a6b4376379737ff6f"),
@@ -59,60 +61,6 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-// ensureSchema creates the application tables and adds the D12 payment columns
-// idempotently. The operator seeds base tables via CNPG postInitApplicationSQL
-// only on first bootstrap, so running this on every start lets existing shops
-// pick up new columns in place.
-func ensureSchema(ctx context.Context, pool *pgxpool.Pool) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS items (
-			id text PRIMARY KEY,
-			name text NOT NULL,
-			price_usdt numeric(36,18) NOT NULL,
-			stock int NOT NULL DEFAULT 0
-		)`,
-		`CREATE TABLE IF NOT EXISTS orders (
-			id text PRIMARY KEY,
-			buyer_wallet text NOT NULL,
-			tx_hash text,
-			amount_usdt numeric(36,18) NOT NULL,
-			created_at timestamptz DEFAULT now()
-		)`,
-		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending'`,
-		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS item_id text`,
-		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS item_quantity int`,
-		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS verified_at timestamptz`,
-	}
-	for _, s := range stmts {
-		if _, err := pool.Exec(ctx, s); err != nil {
-			return fmt.Errorf("ensure schema: %w", err)
-		}
-	}
-	return nil
-}
-
-func openPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
-	poolCfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
-	}
-	poolCfg.MaxConns = 10
-	poolCfg.MinConns = 1
-	poolCfg.MaxConnLifetime = 30 * time.Minute
-
-	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
-	if err != nil {
-		return nil, fmt.Errorf("create pool: %w", err)
-	}
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := pool.Ping(pingCtx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("initial ping: %w", err)
-	}
-	return pool, nil
 }
 
 func requestLogger() gin.HandlerFunc {
