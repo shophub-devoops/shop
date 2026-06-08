@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api, type Item } from '../lib/api';
+import { Search, ShoppingCart, Trash2, Wallet } from 'lucide-react';
+import { api, fmtUsdt, type Item } from '../lib/api';
 import { connectWallet, payUSDT } from '../lib/web3';
 
 // PaymentFlow shows the order status, and while the payment is in flight it
@@ -8,19 +9,19 @@ import { connectWallet, payUSDT } from '../lib/web3';
 function PaymentFlow({ status }: { status: string }) {
   const inFlight = status.startsWith('Waiting') || status.startsWith('Payment sent');
   return (
-    <div className="rounded border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+    <div className="rounded-xl border border-line bg-card px-4 py-3 text-sm">
       <div className="flex items-center gap-3">
-        <span className="font-medium text-slate-700">You</span>
+        <span className="font-medium text-fg">You</span>
         <div className="relative h-5 flex-1">
-          <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 border-t border-dashed border-slate-300" />
+          <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 border-t border-dashed border-line" />
           {inFlight &&
             Array.from({ length: 7 }).map((_, i) => (
               <span key={i} className="coin" style={{ animationDelay: `${i * 0.3}s` }} />
             ))}
         </div>
-        <span className="font-medium text-slate-700">Shop</span>
+        <span className="font-medium text-fg">Shop</span>
       </div>
-      <p className="mt-2 text-slate-600">{status}</p>
+      <p className="mt-2 text-muted">{status}</p>
     </div>
   );
 }
@@ -88,7 +89,7 @@ export default function Storefront() {
   }
 
   // pollOrders polls every order created at checkout until the backend's
-  // on-chain verifier confirms or fails them (or we give up after a few minutes).
+  // on-chain verifier confirms or fails it (or we give up after a few minutes).
   async function pollOrders(ids: string[]) {
     for (let i = 0; i < 40; i++) {
       const orders = await Promise.all(ids.map((id) => api.getOrder(id)));
@@ -148,57 +149,80 @@ export default function Storefront() {
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Items</h1>
+    <div className="animate-fade-up space-y-6">
+      <div className="flex items-end justify-between">
+        <div>
+          <h1 className="font-serif text-[28px] font-medium">Storefront</h1>
+          <p className="mt-1 text-sm text-muted">Browse, add to cart, and pay with USDT on Sepolia.</p>
+        </div>
         {account ? (
-          <span className="text-xs text-slate-500">
-            Wallet: {account.slice(0, 6)}…{account.slice(-4)}
+          <span className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-card px-3 py-1.5 text-xs text-muted">
+            <Wallet size={13} className="text-accent-bright" />
+            {account.slice(0, 6)}…{account.slice(-4)}
           </span>
         ) : (
-          <button onClick={connect} className="rounded bg-slate-900 px-3 py-1 text-sm text-white">
-            Connect wallet
+          <button
+            onClick={connect}
+            className="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-[filter] hover:brightness-110"
+          >
+            <Wallet size={15} /> Connect wallet
           </button>
         )}
       </div>
 
-      <input
-        type="search"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search items…"
-        className="w-full rounded border border-slate-300 px-3 py-2 text-sm"
-      />
+      <div className="relative">
+        <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-faint" />
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search items…"
+          className="w-full rounded-lg border border-line bg-surface py-2.5 pl-10 pr-3.5 text-sm outline-none transition-colors placeholder:text-faint focus:border-accent-bright"
+        />
+      </div>
 
-      {error && <p className="text-red-600">{error}</p>}
+      {error && <p className="text-sm text-red-400">{error}</p>}
       {status && <PaymentFlow status={status} />}
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-5 md:grid-cols-3">
         <ul className="grid gap-3 sm:grid-cols-2 md:col-span-2">
-          {filtered.map((item) => (
-            <li key={item.id} className="rounded-lg border border-slate-200 bg-white p-4">
-              <div className="font-medium">{item.name}</div>
-              <div className="text-sm text-slate-500">{item.price_usdt} USDT</div>
-              <div className="text-xs text-slate-400">In stock: {item.stock}</div>
-              <button
-                onClick={() => addToCart(item)}
-                disabled={item.stock === 0 || (cart[item.id] ?? 0) >= item.stock}
-                className="mt-2 rounded bg-slate-900 px-3 py-1 text-sm text-white disabled:bg-slate-300"
+          {filtered.map((item) => {
+            const inCart = cart[item.id] ?? 0;
+            const soldOut = item.stock === 0;
+            return (
+              <li
+                key={item.id}
+                className="group rounded-xl border border-line bg-card p-4 transition-colors hover:border-white/20"
               >
-                Add to cart
-              </button>
+                <div className="font-semibold">{item.name}</div>
+                <div className="mt-0.5 text-sm text-accent-bright">{fmtUsdt(item.price_usdt)} USDT</div>
+                <div className="mt-1 text-xs text-faint">In stock: {item.stock}</div>
+                <button
+                  onClick={() => addToCart(item)}
+                  disabled={soldOut || inCart >= item.stock}
+                  className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-white/5 py-2 text-sm font-medium text-fg transition-colors hover:bg-accent hover:text-white disabled:cursor-not-allowed disabled:bg-white/5 disabled:text-faint"
+                >
+                  <ShoppingCart size={14} /> {soldOut ? 'Sold out' : 'Add to cart'}
+                </button>
+              </li>
+            );
+          })}
+          {filtered.length === 0 && (
+            <li className="rounded-xl border border-dashed border-line py-12 text-center text-sm text-muted sm:col-span-2">
+              No items match your search.
             </li>
-          ))}
-          {filtered.length === 0 && <li className="text-sm text-slate-500">No items match your search.</li>}
+          )}
         </ul>
 
-        <aside className="rounded-lg border border-slate-200 bg-white p-4">
-          <h2 className="mb-2 font-semibold">Cart</h2>
+        <aside className="h-fit rounded-xl border border-line bg-card p-5">
+          <h2 className="mb-3 flex items-center gap-2 font-serif text-lg font-medium">
+            <ShoppingCart size={16} className="text-accent-bright" /> Cart
+          </h2>
           {cartLines.length === 0 ? (
-            <p className="text-sm text-slate-500">Your cart is empty.</p>
+            <p className="text-sm text-muted">Your cart is empty.</p>
           ) : (
             <>
-              <ul className="space-y-2">
+              <ul className="space-y-2.5">
                 {cartLines.map((line) => (
                   <li key={line.item.id} className="flex items-center justify-between gap-2 text-sm">
                     <span className="flex-1 truncate">{line.item.name}</span>
@@ -208,19 +232,26 @@ export default function Storefront() {
                       max={line.item.stock}
                       value={line.qty}
                       onChange={(e) => setQty(line.item.id, Number(e.target.value))}
-                      className="w-14 rounded border border-slate-300 px-2 py-1"
+                      className="w-14 rounded-md border border-line bg-surface px-2 py-1 text-sm outline-none focus:border-accent-bright"
                     />
+                    <button
+                      onClick={() => setQty(line.item.id, 0)}
+                      className="text-faint transition-colors hover:text-red-400"
+                      title="Remove"
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </li>
                 ))}
               </ul>
-              <div className="mt-3 flex items-center justify-between border-t border-slate-200 pt-2 text-sm font-medium">
-                <span>Total</span>
+              <div className="mt-4 flex items-center justify-between border-t border-line pt-3 text-sm font-medium">
+                <span className="text-muted">Total</span>
                 <span>{total.toFixed(2)} USDT</span>
               </div>
               <button
                 onClick={checkout}
                 disabled={busy}
-                className="mt-3 w-full rounded bg-slate-900 px-3 py-2 text-sm text-white disabled:bg-slate-300"
+                className="btn-gradient mt-4 h-11 w-full rounded-lg text-[15px] font-medium disabled:opacity-60"
               >
                 {busy ? 'Processing…' : 'Pay with USDT'}
               </button>

@@ -1,6 +1,13 @@
 // Typed fetch wrapper for the Shop backend. Keeps every page free of URL and
 // JSON-parsing boilerplate.
 
+// fmtUsdt trims the database's fixed-point precision ("165.000000000000000000")
+// to a clean display value ("165"), leaving real decimals intact ("9.99").
+export const fmtUsdt = (s: string) => {
+  const n = Number(s);
+  return Number.isFinite(n) ? n.toString() : s;
+};
+
 export type Item = {
   id: string;
   name: string;
