@@ -1,6 +1,44 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@500;600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-bg text-fg font-sans antialiased;
+  }
+  h1,
+  h2,
+  h3 {
+    @apply font-serif;
+  }
+}
+
+@layer components {
+  /* Subtle dot grid like Railway's canvas. */
+  .dot-grid {
+    background-image: radial-gradient(rgba(255, 255, 255, 0.09) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  /* Primary CTA — radial purple→indigo gradient with glow. */
+  .btn-gradient {
+    background-image: radial-gradient(73% 138% at 50% 0%, #aa0aaa 50%, #6d1dbd 75%, #381dbd 100%);
+    box-shadow:
+      0 0 6px 0 rgba(180, 40, 180, 0.25),
+      0 0 16px 0 rgba(102, 43, 223, 0.25);
+    @apply border border-[#a05fcf] text-white transition-shadow duration-200;
+  }
+  .btn-gradient:hover {
+    box-shadow:
+      0 0 12px 0 rgba(180, 40, 180, 0.5),
+      0 0 32px 0 rgba(102, 43, 223, 0.5);
+  }
+}
 
 /* Coins streaming from buyer to shop while a USDT payment is in flight. */
 @keyframes coin-flow {
@@ -26,7 +64,7 @@
   width: 8px;
   margin-top: -4px;
   border-radius: 9999px;
-  background: #10b981;
-  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+  background: #a667e4;
+  box-shadow: 0 0 6px rgba(166, 103, 228, 0.7);
   animation: coin-flow 2.4s linear infinite;
 }
