@@ -163,29 +163,49 @@ func (s *postgresStore) GetOrder(ctx context.Context, id string) (order, error) 
 	return o, err
 }
 
+// CreateOrder reserves stock and records the pending order in one transaction:
+// the guarded UPDATE only matches when enough stock remains, so two concurrent
+// buyers can never reserve the same units (no oversell).
 func (s *postgresStore) CreateOrder(ctx context.Context, o order) error {
-	var stock int
-	err := s.pool.QueryRow(ctx, `SELECT stock FROM items WHERE id = $1`, o.ItemID).Scan(&stock)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errNotFound
-	}
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if stock < o.ItemQuantity {
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE items SET stock = stock - $1 WHERE id = $2 AND stock >= $1`,
+		o.ItemQuantity, o.ItemID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Either the item doesn't exist or there isn't enough stock.
+		var exists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM items WHERE id = $1)`, o.ItemID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return errNotFound
+		}
 		return errInsufficientStock
 	}
-	_, err = s.pool.Exec(ctx,
+
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO orders (id, buyer_wallet, tx_hash, amount_usdt, item_id, item_quantity, status)
 		 VALUES ($1, $2, $3, $4::numeric, $5, $6, 'pending')`,
-		o.ID, o.BuyerWallet, o.TxHash, o.AmountUSDT, o.ItemID, o.ItemQuantity)
-	return err
+		o.ID, o.BuyerWallet, o.TxHash, o.AmountUSDT, o.ItemID, o.ItemQuantity); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, tx_hash, amount_usdt::text, COALESCE(item_id, ''), COALESCE(item_quantity, 0)
-		 FROM orders WHERE status = 'pending' AND tx_hash IS NOT NULL`)
+		`SELECT id, COALESCE(tx_hash, ''), amount_usdt::text, COALESCE(item_id, ''),
+		        COALESCE(item_quantity, 0), created_at
+		 FROM orders WHERE status = 'pending'`)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +214,7 @@ func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, 
 	var out []pendingOrder
 	for rows.Next() {
 		var o pendingOrder
-		if err := rows.Scan(&o.id, &o.txHash, &o.amount, &o.itemID, &o.qty); err != nil {
+		if err := rows.Scan(&o.id, &o.txHash, &o.amount, &o.itemID, &o.qty, &o.createdAt); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
@@ -202,11 +222,20 @@ func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, 
 	return out, rows.Err()
 }
 
-// ConfirmOrder claims the order with a conditional UPDATE: only the transaction
-// that flips it out of 'pending' proceeds to decrement stock, so concurrent
-// replica sweeps adjust stock exactly once. Oversell between order and
-// confirmation fails the order rather than driving stock negative.
-func (s *postgresStore) ConfirmOrder(ctx context.Context, orderID, itemID string, qty int) error {
+// ConfirmOrder flips the order out of 'pending' with a conditional UPDATE so
+// concurrent replica sweeps confirm exactly once. Stock was already reserved
+// when the order was created.
+func (s *postgresStore) ConfirmOrder(ctx context.Context, orderID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orders SET status = 'confirmed', verified_at = now()
+		 WHERE id = $1 AND status = 'pending'`, orderID)
+	return err
+}
+
+// FailOrder claims the pending order and restores its reserved stock in one
+// transaction. The conditional claim means a concurrent sweep can't restore
+// the same reservation twice.
+func (s *postgresStore) FailOrder(ctx context.Context, orderID, itemID string, qty int) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -214,32 +243,18 @@ func (s *postgresStore) ConfirmOrder(ctx context.Context, orderID, itemID string
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	tag, err := tx.Exec(ctx,
-		`UPDATE orders SET status = 'confirmed', verified_at = now()
-		 WHERE id = $1 AND status = 'pending'`, orderID)
+		`UPDATE orders SET status = 'failed' WHERE id = $1 AND status = 'pending'`, orderID)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
 		return tx.Commit(ctx) // already handled by another sweep/replica
 	}
-
-	var stock int
-	if err := tx.QueryRow(ctx, `SELECT stock FROM items WHERE id = $1 FOR UPDATE`, itemID).Scan(&stock); err != nil {
-		return err
-	}
-	if stock < qty {
-		if _, err := tx.Exec(ctx, `UPDATE orders SET status = 'failed' WHERE id = $1`, orderID); err != nil {
+	if itemID != "" && qty > 0 {
+		if _, err := tx.Exec(ctx,
+			`UPDATE items SET stock = stock + $1 WHERE id = $2`, qty, itemID); err != nil {
 			return err
 		}
-		return tx.Commit(ctx)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE items SET stock = stock - $1 WHERE id = $2`, qty, itemID); err != nil {
-		return err
 	}
 	return tx.Commit(ctx)
-}
-
-func (s *postgresStore) FailOrder(ctx context.Context, orderID string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE orders SET status = 'failed' WHERE id = $1`, orderID)
-	return err
 }

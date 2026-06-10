@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/ethereum/go-ethereum v1.17.3
 	github.com/gin-gonic/gin v1.12.0
+	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/prometheus/client_golang v1.21.1
 	github.com/testcontainers/testcontainers-go v0.42.0

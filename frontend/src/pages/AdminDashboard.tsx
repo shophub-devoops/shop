@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Package, Plus, Receipt, Trash2 } from 'lucide-react';
-import { api, fmtUsdt, type Item, type Order } from '../lib/api';
+import { useNavigate } from 'react-router-dom';
+import { LogOut, Package, Plus, Receipt, Trash2 } from 'lucide-react';
+import { adminToken, api, ApiError, fmtUsdt, type Item, type Order } from '../lib/api';
 
 const empty: Item = { id: '', name: '', price_usdt: '0', stock: 0 };
 
@@ -19,13 +20,29 @@ export default function AdminDashboard() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [draft, setDraft] = useState<Item>(empty);
   const [error, setError] = useState<string | null>(null);
+  const nav = useNavigate();
+
+  // A 401 means no/expired admin token — send the user to the login page.
+  function fail(e: unknown) {
+    if (e instanceof ApiError && e.status === 401) {
+      adminToken.clear();
+      nav('/admin/login');
+      return;
+    }
+    setError(String(e));
+  }
 
   function refresh() {
-    api.listItems().then(setItems).catch((e) => setError(String(e)));
-    api.listOrders().then(setOrders).catch((e) => setError(String(e)));
+    api.listItems().then(setItems).catch(fail);
+    api.listOrders().then(setOrders).catch(fail);
   }
 
   useEffect(refresh, []);
+
+  function signOut() {
+    adminToken.clear();
+    nav('/admin/login');
+  }
 
   async function createItem(e: React.FormEvent) {
     e.preventDefault();
@@ -34,7 +51,7 @@ export default function AdminDashboard() {
       setDraft(empty);
       refresh();
     } catch (e) {
-      setError(String(e));
+      fail(e);
     }
   }
 
@@ -43,7 +60,7 @@ export default function AdminDashboard() {
       await api.deleteItem(id);
       refresh();
     } catch (e) {
-      setError(String(e));
+      fail(e);
     }
   }
 
@@ -52,9 +69,17 @@ export default function AdminDashboard() {
 
   return (
     <div className="animate-fade-up space-y-10">
-      <div>
-        <h1 className="font-serif text-[28px] font-medium">Admin dashboard</h1>
-        <p className="mt-1 text-sm text-muted">Manage your catalogue and review incoming orders.</p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="font-serif text-[28px] font-medium">Admin dashboard</h1>
+          <p className="mt-1 text-sm text-muted">Manage your catalogue and review incoming orders.</p>
+        </div>
+        <button
+          onClick={signOut}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm text-muted transition-colors hover:text-fg"
+        >
+          <LogOut size={14} /> Sign out
+        </button>
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}

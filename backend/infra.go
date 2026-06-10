@@ -26,6 +26,10 @@ type config struct {
 	RPCURL        string
 	TokenContract string
 	TokenDecimals int
+
+	// AdminPassword guards item writes and order listing. Injected by the
+	// operator from the per-shop admin Secret; empty disables the gate (dev).
+	AdminPassword string
 }
 
 func loadConfig() (config, error) {
@@ -45,6 +49,7 @@ func loadConfig() (config, error) {
 		RPCURL:        envOr("SEPOLIA_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
 		TokenContract: envOr("USDT_CONTRACT", "0x74b0ef872a9f1a4bbb07a01a6b4376379737ff6f"),
 		TokenDecimals: 6,
+		AdminPassword: os.Getenv("ADMIN_PASSWORD"),
 	}
 	if d := os.Getenv("USDT_DECIMALS"); d != "" {
 		n, err := strconv.Atoi(d)

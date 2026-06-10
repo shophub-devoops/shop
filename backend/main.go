@@ -30,6 +30,9 @@ func main() {
 		slog.Error("invalid configuration", "err", err)
 		os.Exit(1)
 	}
+	if cfg.AdminPassword == "" {
+		slog.Warn("ADMIN_PASSWORD not set — admin endpoints are NOT protected (dev mode)")
+	}
 
 	store, err := newStore(context.Background(), cfg.DatabaseURL, cfg.DBName)
 	if err != nil {
@@ -44,15 +47,15 @@ func main() {
 	}
 
 	// Web3 payment verifier (D12): a background sweep that confirms pending
-	// orders against Sepolia. Disabled (with a warning) if it can't be wired,
-	// so the API still serves without on-chain config.
+	// orders against Sepolia and expires abandoned ones (releasing their stock
+	// reservation). Without on-chain config the sweep still runs expiry-only.
 	verifierCtx, stopVerifier := context.WithCancel(context.Background())
 	defer stopVerifier()
-	if v, err := newVerifier(cfg); err != nil {
-		slog.Warn("payment verifier disabled", "err", err)
-	} else {
-		go (&paymentVerifier{store: store, v: v, decimals: cfg.TokenDecimals}).run(verifierCtx)
+	v, err := newVerifier(cfg)
+	if err != nil {
+		slog.Warn("on-chain verification disabled (sweep runs expiry-only)", "err", err)
 	}
+	go (&paymentVerifier{store: store, v: v, decimals: cfg.TokenDecimals}).run(verifierCtx)
 
 	shutdownTracing, err := initTracing(context.Background())
 	if err != nil {
@@ -104,18 +107,26 @@ func buildRouter(store Store, cfg config) http.Handler {
 	r.GET("/probe/readiness", readinessHandler(store))
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
+	// Admin gate (spec: Shop "Admin" role). The operator injects ADMIN_PASSWORD
+	// from the per-shop admin Secret; without it (local dev, tests) the gate is
+	// a pass-through.
+	admin := newAdminAuth(cfg.AdminPassword)
+
 	api := r.Group("/api")
 	{
 		api.GET("/shop-info", shopInfo(cfg))
+		api.POST("/auth/login", adminLogin(admin))
 
 		items := api.Group("/items")
 		items.GET("", listItems(store))
-		items.POST("", createItem(store))
-		items.PUT("/:id", updateItem(store))
-		items.DELETE("/:id", deleteItem(store))
+		items.POST("", admin.require(), createItem(store))
+		items.PUT("/:id", admin.require(), updateItem(store))
+		items.DELETE("/:id", admin.require(), deleteItem(store))
 
 		orders := api.Group("/orders")
-		orders.GET("", listOrders(store))
+		// Listing all orders is admin-only (spec 2.2); buyers poll their own
+		// order by id, and order creation stays open to the storefront.
+		orders.GET("", admin.require(), listOrders(store))
 		orders.POST("", createOrder(store))
 		orders.GET("/:id", getOrder(store))
 	}

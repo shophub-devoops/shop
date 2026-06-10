@@ -1,18 +1,27 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ShieldCheck } from 'lucide-react';
+import { api } from '../lib/api';
 
-// Placeholder admin login. Real JWT auth lands with D13; for now any non-empty
-// credentials grant access so the admin dashboard is reachable in the demo.
+// Admin login: exchanges the shop's admin password (shown to the owner in
+// ShopHub) for a bearer token via POST /api/auth/login.
 export default function AdminLogin() {
-  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const nav = useNavigate();
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (email && password) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.login(password);
       nav('/admin');
+    } catch {
+      setError('Invalid password.');
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -35,18 +44,7 @@ export default function AdminLogin() {
 
           <form onSubmit={submit} className="mt-7 space-y-4">
             <div>
-              <label className="mb-1.5 block text-[13px] font-medium text-fg/80">Email</label>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@shop.local"
-                className={field}
-              />
-            </div>
-            <div>
-              <label className="mb-1.5 block text-[13px] font-medium text-fg/80">Password</label>
+              <label className="mb-1.5 block text-[13px] font-medium text-fg/80">Admin password</label>
               <input
                 type="password"
                 required
@@ -56,16 +54,18 @@ export default function AdminLogin() {
                 className={field}
               />
             </div>
+            {error && <p className="text-sm text-red-400">{error}</p>}
             <button
               type="submit"
-              className="btn-gradient h-11 w-full rounded-lg text-[15px] font-medium"
+              disabled={busy}
+              className="btn-gradient h-11 w-full rounded-lg text-[15px] font-medium disabled:opacity-60"
             >
-              Sign in
+              {busy ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
 
           <p className="mt-6 text-center text-xs text-faint">
-            Demo gate — any credentials work (admin auth is owner-side only).
+            The admin password is shown to the shop owner in the ShopHub dashboard.
           </p>
         </div>
       </div>

@@ -143,10 +143,13 @@ func TestCreateOrderRespectsStock(t *testing.T) {
 		t.Fatalf("seed item = %d", w.Code)
 	}
 
-	// Order within stock → 201.
+	// Order within stock → 201, and the stock is reserved immediately (5-2=3).
 	ok := order{ID: "o1", BuyerWallet: "0xBUY", AmountUSDT: "5.00", ItemID: "ord-item", ItemQuantity: 2}
 	if w := do(r, http.MethodPost, "/api/orders", ok); w.Code != http.StatusCreated {
 		t.Fatalf("valid order = %d (body: %s)", w.Code, w.Body.String())
+	}
+	if it := listItemIDs(t, r)["ord-item"]; it.Stock != 3 {
+		t.Fatalf("stock after order = %d, want 3 (reserved at creation)", it.Stock)
 	}
 
 	// Order exceeding stock → 409.
@@ -179,22 +182,24 @@ func TestCreateOrderRespectsStock(t *testing.T) {
 	}
 }
 
-// TestConfirmIsIdempotent guards the multi-replica payment sweep: confirming the
-// same order more than once must decrement stock exactly once.
+// TestConfirmIsIdempotent guards the multi-replica payment sweep: stock is
+// reserved once at order creation, and repeated confirms don't touch it again.
 func TestConfirmIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	if _, err := testPool.Exec(ctx,
 		`INSERT INTO items (id, name, price_usdt, stock) VALUES ('idem-item','Idem','3'::numeric,5)`); err != nil {
 		t.Fatalf("seed item: %v", err)
 	}
-	if _, err := testPool.Exec(ctx,
-		`INSERT INTO orders (id, buyer_wallet, tx_hash, amount_usdt, item_id, item_quantity, status)
-		 VALUES ('idem-order','0xBUY','0xtx','6'::numeric,'idem-item',2,'pending')`); err != nil {
-		t.Fatalf("seed order: %v", err)
+	tx := "0xtx"
+	if err := testStore.CreateOrder(ctx, order{
+		ID: "idem-order", BuyerWallet: "0xBUY", TxHash: &tx, AmountUSDT: "6",
+		ItemID: "idem-item", ItemQuantity: 2,
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
 	}
 
 	for i := 0; i < 3; i++ {
-		if err := testStore.ConfirmOrder(ctx, "idem-order", "idem-item", 2); err != nil {
+		if err := testStore.ConfirmOrder(ctx, "idem-order"); err != nil {
 			t.Fatalf("confirm #%d: %v", i, err)
 		}
 	}
@@ -208,9 +213,101 @@ func TestConfirmIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if stock != 3 {
-		t.Errorf("stock = %d, want 3 (decremented once by 2)", stock)
+		t.Errorf("stock = %d, want 3 (reserved once at creation)", stock)
 	}
 	if status != "confirmed" {
 		t.Errorf("status = %q, want confirmed", status)
+	}
+}
+
+// TestFailOrderRestoresStock guards the reservation release: failing a pending
+// order restores its stock exactly once, even when swept by multiple replicas.
+func TestFailOrderRestoresStock(t *testing.T) {
+	ctx := context.Background()
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO items (id, name, price_usdt, stock) VALUES ('fail-item','Fail','3'::numeric,5)`); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+	if err := testStore.CreateOrder(ctx, order{
+		ID: "fail-order", BuyerWallet: "0xBUY", AmountUSDT: "6",
+		ItemID: "fail-item", ItemQuantity: 2,
+	}); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	var stock int
+	if err := testPool.QueryRow(ctx, `SELECT stock FROM items WHERE id='fail-item'`).Scan(&stock); err != nil {
+		t.Fatal(err)
+	}
+	if stock != 3 {
+		t.Fatalf("stock after order = %d, want 3", stock)
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := testStore.FailOrder(ctx, "fail-order", "fail-item", 2); err != nil {
+			t.Fatalf("fail #%d: %v", i, err)
+		}
+	}
+
+	var status string
+	if err := testPool.QueryRow(ctx, `SELECT stock FROM items WHERE id='fail-item'`).Scan(&stock); err != nil {
+		t.Fatal(err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT status FROM orders WHERE id='fail-order'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if stock != 5 {
+		t.Errorf("stock = %d, want 5 (restored exactly once)", stock)
+	}
+	if status != "failed" {
+		t.Errorf("status = %q, want failed", status)
+	}
+}
+
+// TestAdminAuth verifies the admin gate end-to-end: writes and order listing
+// require a token from /api/auth/login, while catalogue reads stay public.
+func TestAdminAuth(t *testing.T) {
+	r := buildRouter(testStore, config{TokenDecimals: 6, AdminPassword: "s3cret-pass"})
+
+	// Public reads work without a token.
+	if w := do(r, http.MethodGet, "/api/items", nil); w.Code != http.StatusOK {
+		t.Fatalf("public item list = %d, want 200", w.Code)
+	}
+
+	// Writes and order listing are rejected without a token.
+	it := item{ID: "auth-1", Name: "Locked", Price: "1.00", Stock: 1}
+	if w := do(r, http.MethodPost, "/api/items", it); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated create = %d, want 401", w.Code)
+	}
+	if w := do(r, http.MethodGet, "/api/orders", nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated order list = %d, want 401", w.Code)
+	}
+
+	// Wrong password → 401.
+	if w := do(r, http.MethodPost, "/api/auth/login", gin.H{"password": "wrong"}); w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-password login = %d, want 401", w.Code)
+	}
+
+	// Correct password → token that unlocks admin endpoints.
+	w := do(r, http.MethodPost, "/api/auth/login", gin.H{"password": "s3cret-pass"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("login = %d (body: %s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Token == "" {
+		t.Fatalf("login response %q: %v", w.Body.String(), err)
+	}
+
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(it)
+	req := httptest.NewRequest(http.MethodPost, "/api/items", &buf)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+resp.Token)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("authenticated create = %d (body: %s)", rec.Code, rec.Body.String())
 	}
 }
