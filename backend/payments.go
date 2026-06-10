@@ -9,11 +9,18 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// pendingOrderTTL is how long an order without a payment transaction may hold
+// its stock reservation. Buyers who abandon checkout (MetaMask closed, never
+// signed) would otherwise reserve stock forever.
+const pendingOrderTTL = 30 * time.Minute
+
 // paymentVerifier periodically checks pending orders against the chain and
-// confirms (decrementing stock) or fails them. A sweep loop — rather than a
-// per-request goroutine — survives pod restarts: pending orders are re-checked
-// whenever the process is up. All persistence goes through Store so the same
-// loop works on Postgres or MongoDB.
+// confirms or fails them (stock is reserved at order creation; failing
+// restores it). A sweep loop — rather than a per-request goroutine — survives
+// pod restarts: pending orders are re-checked whenever the process is up. All
+// persistence goes through Store so the same loop works on Postgres or
+// MongoDB. v may be nil (no on-chain config): the sweep then only expires
+// abandoned orders.
 type paymentVerifier struct {
 	store    Store
 	v        *verifier
@@ -41,6 +48,21 @@ func (p *paymentVerifier) sweep(ctx context.Context) {
 		return
 	}
 	for _, o := range pending {
+		// No tx hash: the buyer never completed payment. Expire the order after
+		// the TTL so its stock reservation is released.
+		if o.txHash == "" {
+			if time.Since(o.createdAt) > pendingOrderTTL {
+				if err := p.store.FailOrder(ctx, o.id, o.itemID, o.qty); err != nil {
+					slog.Error("expire order", "order", o.id, "err", err)
+				} else {
+					slog.Info("order expired (no payment)", "order", o.id)
+				}
+			}
+			continue
+		}
+		if p.v == nil {
+			continue // no on-chain config — leave paid orders pending
+		}
 		minAmount, err := toBaseUnits(o.amount, p.decimals)
 		if err != nil {
 			slog.Error("amount parse", "order", o.id, "err", err)
@@ -53,13 +75,13 @@ func (p *paymentVerifier) sweep(ctx context.Context) {
 		}
 		switch st {
 		case statusConfirmed:
-			if err := p.store.ConfirmOrder(ctx, o.id, o.itemID, o.qty); err != nil {
+			if err := p.store.ConfirmOrder(ctx, o.id); err != nil {
 				slog.Error("confirm order", "order", o.id, "err", err)
 			} else {
 				slog.Info("order confirmed", "order", o.id, "tx", o.txHash)
 			}
 		case statusFailed:
-			if err := p.store.FailOrder(ctx, o.id); err != nil {
+			if err := p.store.FailOrder(ctx, o.id, o.itemID, o.qty); err != nil {
 				slog.Error("fail order", "order", o.id, "err", err)
 			}
 		}

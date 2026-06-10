@@ -44,14 +44,34 @@ export type NewOrder = {
   item_quantity: number;
 };
 
+// ApiError keeps the HTTP status so callers can react to 401 (expired or
+// missing admin token) by sending the user back to the login page.
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+const TOKEN_KEY = 'shop_admin_token';
+
+export const adminToken = {
+  get: () => localStorage.getItem(TOKEN_KEY),
+  set: (t: string) => localStorage.setItem(TOKEN_KEY, t),
+  clear: () => localStorage.removeItem(TOKEN_KEY),
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  });
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = adminToken.get();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const res = await fetch(path, { headers, ...init });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`${res.status} ${res.statusText}: ${body}`);
+    throw new ApiError(res.status, `${res.status} ${res.statusText}: ${body}`);
   }
   if (res.status === 204) {
     return undefined as T;
@@ -60,6 +80,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  // login exchanges the shop's admin password for a bearer token used on
+  // item writes and the order list.
+  login: async (password: string) => {
+    const { token } = await request<{ token: string }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+    adminToken.set(token);
+  },
   listItems: () => request<Item[]>('/api/items'),
   createItem: (item: Item) =>
     request<Item>('/api/items', { method: 'POST', body: JSON.stringify(item) }),

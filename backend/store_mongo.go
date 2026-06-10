@@ -125,26 +125,40 @@ func (s *mongoStore) GetOrder(ctx context.Context, id string) (order, error) {
 	return o, err
 }
 
+// CreateOrder reserves stock with a guarded $inc (only matches when enough
+// stock remains — atomic on the replica set, so no oversell), then records the
+// pending order. If the insert fails the reservation is rolled back.
 func (s *mongoStore) CreateOrder(ctx context.Context, o order) error {
-	var it item
-	err := s.items.FindOne(ctx, bson.M{"_id": o.ItemID}).Decode(&it)
-	if errors.Is(err, mongo.ErrNoDocuments) {
-		return errNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if it.Stock < o.ItemQuantity {
+	dec := s.items.FindOneAndUpdate(ctx,
+		bson.M{"_id": o.ItemID, "stock": bson.M{"$gte": o.ItemQuantity}},
+		bson.M{"$inc": bson.M{"stock": -o.ItemQuantity}})
+	if errors.Is(dec.Err(), mongo.ErrNoDocuments) {
+		// Either the item doesn't exist or there isn't enough stock.
+		err := s.items.FindOne(ctx, bson.M{"_id": o.ItemID}).Err()
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return errNotFound
+		}
+		if err != nil {
+			return err
+		}
 		return errInsufficientStock
 	}
+	if dec.Err() != nil {
+		return dec.Err()
+	}
+
 	o.Status = "pending"
 	o.CreatedAt = time.Now()
-	_, err = s.orders.InsertOne(ctx, o)
-	return err
+	if _, err := s.orders.InsertOne(ctx, o); err != nil {
+		// Roll the reservation back so a failed insert doesn't leak stock.
+		_, _ = s.items.UpdateByID(ctx, o.ItemID, bson.M{"$inc": bson.M{"stock": o.ItemQuantity}})
+		return err
+	}
+	return nil
 }
 
 func (s *mongoStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, error) {
-	cur, err := s.orders.Find(ctx, bson.M{"status": "pending", "tx_hash": bson.M{"$ne": nil}})
+	cur, err := s.orders.Find(ctx, bson.M{"status": "pending"})
 	if err != nil {
 		return nil, err
 	}
@@ -160,40 +174,41 @@ func (s *mongoStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, err
 		}
 		out = append(out, pendingOrder{
 			id: o.ID, txHash: tx, amount: o.AmountUSDT, itemID: o.ItemID, qty: o.ItemQuantity,
+			createdAt: o.CreatedAt,
 		})
 	}
 	return out, nil
 }
 
-// ConfirmOrder claims the order with a conditional FindOneAndUpdate (only the
-// update that flips it out of 'pending' proceeds), then decrements stock with a
-// guarded $inc that only matches when stock is sufficient — so concurrent
-// replica sweeps decrement exactly once and oversell fails the order instead of
-// driving stock negative. The replica-set (MongoDBCommunity) makes both updates
-// individually atomic.
-func (s *mongoStore) ConfirmOrder(ctx context.Context, orderID, itemID string, qty int) error {
+// ConfirmOrder flips the order out of 'pending' with a conditional update so
+// concurrent replica sweeps confirm exactly once. Stock was already reserved
+// when the order was created.
+func (s *mongoStore) ConfirmOrder(ctx context.Context, orderID string) error {
 	claim := s.orders.FindOneAndUpdate(ctx,
 		bson.M{"_id": orderID, "status": "pending"},
 		bson.M{"$set": bson.M{"status": "confirmed", "verified_at": time.Now()}})
 	if errors.Is(claim.Err(), mongo.ErrNoDocuments) {
 		return nil // already handled by another sweep/replica
 	}
+	return claim.Err()
+}
+
+// FailOrder claims the pending order with a conditional update, then restores
+// its reserved stock. The claim guards against a concurrent sweep restoring
+// the same reservation twice.
+func (s *mongoStore) FailOrder(ctx context.Context, orderID, itemID string, qty int) error {
+	claim := s.orders.FindOneAndUpdate(ctx,
+		bson.M{"_id": orderID, "status": "pending"},
+		bson.M{"$set": bson.M{"status": "failed"}})
+	if errors.Is(claim.Err(), mongo.ErrNoDocuments) {
+		return nil // already handled by another sweep/replica
+	}
 	if claim.Err() != nil {
 		return claim.Err()
 	}
-
-	dec := s.items.FindOneAndUpdate(ctx,
-		bson.M{"_id": itemID, "stock": bson.M{"$gte": qty}},
-		bson.M{"$inc": bson.M{"stock": -qty}})
-	if errors.Is(dec.Err(), mongo.ErrNoDocuments) {
-		// Sold out between order and confirmation — fail rather than oversell.
-		_, err := s.orders.UpdateByID(ctx, orderID, bson.M{"$set": bson.M{"status": "failed"}})
+	if itemID != "" && qty > 0 {
+		_, err := s.items.UpdateByID(ctx, itemID, bson.M{"$inc": bson.M{"stock": qty}})
 		return err
 	}
-	return dec.Err()
-}
-
-func (s *mongoStore) FailOrder(ctx context.Context, orderID string) error {
-	_, err := s.orders.UpdateByID(ctx, orderID, bson.M{"$set": bson.M{"status": "failed"}})
-	return err
+	return nil
 }

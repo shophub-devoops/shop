@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Domain errors the HTTP layer maps to status codes, so a Store implementation
@@ -14,10 +15,13 @@ var (
 	errInsufficientStock = errors.New("insufficient stock")
 )
 
-// pendingOrder is a paid-but-unconfirmed order the payment verifier sweeps.
+// pendingOrder is an unconfirmed order the payment verifier sweeps: orders with
+// a tx hash get verified on-chain, abandoned ones (no tx hash) expire after
+// pendingOrderTTL so their stock reservation is released.
 type pendingOrder struct {
 	id, txHash, amount, itemID string
 	qty                        int
+	createdAt                  time.Time
 }
 
 // Store is the persistence boundary for one Shop tenant: items, orders, and the
@@ -38,13 +42,18 @@ type Store interface {
 
 	ListOrders(ctx context.Context) ([]order, error)
 	GetOrder(ctx context.Context, id string) (order, error)
+	// CreateOrder atomically reserves stock (guarded decrement) and records the
+	// pending order, so two buyers can never oversell the same units. The
+	// reservation is released by FailOrder (payment failed / order expired).
 	CreateOrder(ctx context.Context, o order) error
 
 	ListPendingOrders(ctx context.Context) ([]pendingOrder, error)
-	// ConfirmOrder flips a pending order to confirmed and decrements stock
-	// exactly once, even across concurrent replicas (oversell -> failed).
-	ConfirmOrder(ctx context.Context, orderID, itemID string, qty int) error
-	FailOrder(ctx context.Context, orderID string) error
+	// ConfirmOrder flips a pending order to confirmed exactly once, even across
+	// concurrent replicas. Stock was already reserved at creation.
+	ConfirmOrder(ctx context.Context, orderID string) error
+	// FailOrder flips a pending order to failed and restores its reserved stock
+	// exactly once (the status claim guards against double-restores).
+	FailOrder(ctx context.Context, orderID, itemID string, qty int) error
 }
 
 // newStore selects the implementation from the DATABASE_URL scheme. dbName is

@@ -77,14 +77,19 @@ func TestMongoStore(t *testing.T) {
 		t.Fatalf("get missing order = %v, want errNotFound", err)
 	}
 
-	// The order with a tx hash shows up for the verifier sweep.
+	// Stock is reserved at order creation (12-2=10).
+	if items, _ := store.ListItems(ctx); items[0].Stock != 10 {
+		t.Fatalf("stock after order = %d, want 10 (reserved at creation)", items[0].Stock)
+	}
+
+	// The pending order shows up for the verifier sweep.
 	if pending, err := store.ListPendingOrders(ctx); err != nil || len(pending) != 1 || pending[0].id != "ord-ok" {
 		t.Fatalf("pending = %+v, err %v", pending, err)
 	}
 
-	// ConfirmOrder is idempotent: 3 calls decrement stock exactly once (12-2=10).
+	// ConfirmOrder is idempotent and never touches stock again.
 	for i := 0; i < 3; i++ {
-		if err := store.ConfirmOrder(ctx, "ord-ok", "m1", 2); err != nil {
+		if err := store.ConfirmOrder(ctx, "ord-ok"); err != nil {
 			t.Fatalf("confirm #%d: %v", i, err)
 		}
 	}
@@ -92,6 +97,25 @@ func TestMongoStore(t *testing.T) {
 		t.Errorf("status = %q, want confirmed", o.Status)
 	}
 	if items, _ := store.ListItems(ctx); items[0].Stock != 10 {
-		t.Errorf("stock = %d, want 10 (decremented once by 2)", items[0].Stock)
+		t.Errorf("stock = %d, want 10 (reserved once at creation)", items[0].Stock)
+	}
+
+	// FailOrder releases the reservation exactly once (idempotent claim).
+	if err := store.CreateOrder(ctx, order{ID: "ord-fail", BuyerWallet: "0xBUY", AmountUSDT: "10", ItemID: "m1", ItemQuantity: 3}); err != nil {
+		t.Fatalf("create order to fail: %v", err)
+	}
+	if items, _ := store.ListItems(ctx); items[0].Stock != 7 {
+		t.Fatalf("stock after second order = %d, want 7", items[0].Stock)
+	}
+	for i := 0; i < 3; i++ {
+		if err := store.FailOrder(ctx, "ord-fail", "m1", 3); err != nil {
+			t.Fatalf("fail #%d: %v", i, err)
+		}
+	}
+	if o, _ := store.GetOrder(ctx, "ord-fail"); o.Status != "failed" {
+		t.Errorf("status = %q, want failed", o.Status)
+	}
+	if items, _ := store.ListItems(ctx); items[0].Stock != 10 {
+		t.Errorf("stock = %d, want 10 (restored exactly once)", items[0].Stock)
 	}
 }
