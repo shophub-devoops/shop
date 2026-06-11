@@ -60,17 +60,22 @@ func TestMongoStore(t *testing.T) {
 	}
 
 	// Order creation enforces item existence and stock.
-	if err := store.CreateOrder(ctx, order{ID: "ord-unknown", BuyerWallet: "0xBUY", AmountUSDT: "1", ItemID: "nope", ItemQuantity: 1}); !errors.Is(err, errNotFound) {
+	if _, err := store.CreateOrder(ctx, order{ID: "ord-unknown", BuyerWallet: "0xBUY", ItemID: "nope", ItemQuantity: 1}); !errors.Is(err, errNotFound) {
 		t.Fatalf("order unknown item = %v, want errNotFound", err)
 	}
-	if err := store.CreateOrder(ctx, order{ID: "ord-toomuch", BuyerWallet: "0xBUY", AmountUSDT: "99", ItemID: "m1", ItemQuantity: 99}); !errors.Is(err, errInsufficientStock) {
+	if _, err := store.CreateOrder(ctx, order{ID: "ord-toomuch", BuyerWallet: "0xBUY", ItemID: "m1", ItemQuantity: 99}); !errors.Is(err, errInsufficientStock) {
 		t.Fatalf("order over stock = %v, want errInsufficientStock", err)
 	}
 	tx := "0xtx"
-	if err := store.CreateOrder(ctx, order{ID: "ord-ok", BuyerWallet: "0xBUY", TxHash: &tx, AmountUSDT: "20", ItemID: "m1", ItemQuantity: 2}); err != nil {
+	// The client-sent amount lies ("1"); the store must compute 9.99 × 2 = 19.98.
+	created, err := store.CreateOrder(ctx, order{ID: "ord-ok", BuyerWallet: "0xBUY", TxHash: &tx, AmountUSDT: "1", ItemID: "m1", ItemQuantity: 2})
+	if err != nil {
 		t.Fatalf("create order: %v", err)
 	}
-	if o, err := store.GetOrder(ctx, "ord-ok"); err != nil || o.Status != "pending" {
+	if created.AmountUSDT != "19.98" {
+		t.Fatalf("amount = %q, want %q (server-computed price × qty)", created.AmountUSDT, "19.98")
+	}
+	if o, err := store.GetOrder(ctx, "ord-ok"); err != nil || o.Status != "pending" || o.AmountUSDT != "19.98" {
 		t.Fatalf("get order = %+v err %v", o, err)
 	}
 	if _, err := store.GetOrder(ctx, "missing"); !errors.Is(err, errNotFound) {
@@ -101,7 +106,7 @@ func TestMongoStore(t *testing.T) {
 	}
 
 	// FailOrder releases the reservation exactly once (idempotent claim).
-	if err := store.CreateOrder(ctx, order{ID: "ord-fail", BuyerWallet: "0xBUY", AmountUSDT: "10", ItemID: "m1", ItemQuantity: 3}); err != nil {
+	if _, err := store.CreateOrder(ctx, order{ID: "ord-fail", BuyerWallet: "0xBUY", ItemID: "m1", ItemQuantity: 3}); err != nil {
 		t.Fatalf("create order to fail: %v", err)
 	}
 	if items, _ := store.ListItems(ctx); items[0].Stock != 7 {

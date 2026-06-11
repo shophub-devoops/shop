@@ -128,7 +128,10 @@ func (s *mongoStore) GetOrder(ctx context.Context, id string) (order, error) {
 // CreateOrder reserves stock with a guarded $inc (only matches when enough
 // stock remains — atomic on the replica set, so no oversell), then records the
 // pending order. If the insert fails the reservation is rolled back.
-func (s *mongoStore) CreateOrder(ctx context.Context, o order) error {
+// FindOneAndUpdate returns the matched item, whose stored price is used to
+// compute the order amount server-side (price × qty); the client-supplied
+// amount is never trusted.
+func (s *mongoStore) CreateOrder(ctx context.Context, o order) (order, error) {
 	dec := s.items.FindOneAndUpdate(ctx,
 		bson.M{"_id": o.ItemID, "stock": bson.M{"$gte": o.ItemQuantity}},
 		bson.M{"$inc": bson.M{"stock": -o.ItemQuantity}})
@@ -136,25 +139,38 @@ func (s *mongoStore) CreateOrder(ctx context.Context, o order) error {
 		// Either the item doesn't exist or there isn't enough stock.
 		err := s.items.FindOne(ctx, bson.M{"_id": o.ItemID}).Err()
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return errNotFound
+			return order{}, errNotFound
 		}
 		if err != nil {
-			return err
+			return order{}, err
 		}
-		return errInsufficientStock
+		return order{}, errInsufficientStock
 	}
 	if dec.Err() != nil {
-		return dec.Err()
+		return order{}, dec.Err()
 	}
 
+	var it item
+	if err := dec.Decode(&it); err != nil {
+		// Roll the reservation back so a failed decode doesn't leak stock.
+		_, _ = s.items.UpdateByID(ctx, o.ItemID, bson.M{"$inc": bson.M{"stock": o.ItemQuantity}})
+		return order{}, err
+	}
+	amount, err := orderTotal(it.Price, o.ItemQuantity)
+	if err != nil {
+		_, _ = s.items.UpdateByID(ctx, o.ItemID, bson.M{"$inc": bson.M{"stock": o.ItemQuantity}})
+		return order{}, err
+	}
+
+	o.AmountUSDT = amount
 	o.Status = "pending"
 	o.CreatedAt = time.Now()
 	if _, err := s.orders.InsertOne(ctx, o); err != nil {
 		// Roll the reservation back so a failed insert doesn't leak stock.
 		_, _ = s.items.UpdateByID(ctx, o.ItemID, bson.M{"$inc": bson.M{"stock": o.ItemQuantity}})
-		return err
+		return order{}, err
 	}
-	return nil
+	return o, nil
 }
 
 func (s *mongoStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, error) {

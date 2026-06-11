@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 )
@@ -45,7 +46,10 @@ type Store interface {
 	// CreateOrder atomically reserves stock (guarded decrement) and records the
 	// pending order, so two buyers can never oversell the same units. The
 	// reservation is released by FailOrder (payment failed / order expired).
-	CreateOrder(ctx context.Context, o order) error
+	// The order amount is computed here from the item's stored price × quantity
+	// — never trusted from the client — and returned in the persisted order so
+	// the payment verifier checks the real total.
+	CreateOrder(ctx context.Context, o order) (order, error)
 
 	ListPendingOrders(ctx context.Context) ([]pendingOrder, error)
 	// ConfirmOrder flips a pending order to confirmed exactly once, even across
@@ -54,6 +58,19 @@ type Store interface {
 	// FailOrder flips a pending order to failed and restores its reserved stock
 	// exactly once (the status claim guards against double-restores).
 	FailOrder(ctx context.Context, orderID, itemID string, qty int) error
+}
+
+// orderTotal computes price × qty as a decimal string. Prices travel as strings
+// end-to-end (numeric in Postgres), so the multiplication uses big.Rat to avoid
+// float drift; trailing zeros are trimmed ("19.980000" -> "19.98").
+func orderTotal(price string, qty int) (string, error) {
+	r, ok := new(big.Rat).SetString(price)
+	if !ok {
+		return "", fmt.Errorf("invalid price %q", price)
+	}
+	r.Mul(r, new(big.Rat).SetInt64(int64(qty)))
+	s := strings.TrimRight(r.FloatString(18), "0")
+	return strings.TrimSuffix(s, "."), nil
 }
 
 // newStore selects the implementation from the DATABASE_URL scheme. dbName is

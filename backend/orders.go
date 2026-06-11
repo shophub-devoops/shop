@@ -9,10 +9,13 @@ import (
 )
 
 type order struct {
-	ID           string    `json:"id" bson:"_id"`
-	BuyerWallet  string    `json:"buyer_wallet" binding:"required" bson:"buyer_wallet"`
-	TxHash       *string   `json:"tx_hash,omitempty" bson:"tx_hash"`
-	AmountUSDT   string    `json:"amount_usdt" binding:"required" bson:"amount_usdt"`
+	ID          string  `json:"id" bson:"_id"`
+	BuyerWallet string  `json:"buyer_wallet" binding:"required" bson:"buyer_wallet"`
+	TxHash      *string `json:"tx_hash,omitempty" bson:"tx_hash"`
+	// AmountUSDT is output-only: the store computes it from the item's stored
+	// price × quantity at creation, so a crafted request can't understate what
+	// the payment verifier expects on-chain. Any client-sent value is ignored.
+	AmountUSDT   string    `json:"amount_usdt" bson:"amount_usdt"`
 	Status       string    `json:"status" bson:"status"`
 	CreatedAt    time.Time `json:"created_at" bson:"created_at"`
 	ItemID       string    `json:"item_id,omitempty" binding:"required" bson:"item_id"`
@@ -61,7 +64,7 @@ func createOrder(s Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "id is required"})
 			return
 		}
-		err := s.CreateOrder(c.Request.Context(), in)
+		out, err := s.CreateOrder(c.Request.Context(), in)
 		switch {
 		case errors.Is(err, errNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "item not found"})
@@ -70,8 +73,7 @@ func createOrder(s Store) gin.HandlerFunc {
 		case err != nil:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		default:
-			in.Status = "pending"
-			c.JSON(http.StatusCreated, in)
+			c.JSON(http.StatusCreated, out)
 		}
 	}
 }
