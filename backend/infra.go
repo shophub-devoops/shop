@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
@@ -72,9 +73,16 @@ func requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		c.Next()
+		// FullPath is empty for requests that matched no route (the bulk of
+		// real 404s) — log the raw URL path there so Loki shows which endpoint
+		// was hit (spec 4.1: 404s with their endpoints).
+		path := c.FullPath()
+		if path == "" {
+			path = c.Request.URL.Path
+		}
 		slog.Info("http",
 			"method", c.Request.Method,
-			"path", c.FullPath(),
+			"path", path,
 			"status", c.Writer.Status(),
 			"duration_ms", time.Since(start).Milliseconds(),
 			"client_ip", c.ClientIP(),
@@ -116,7 +124,16 @@ func metricsMiddleware() gin.HandlerFunc {
 		c.Next()
 		route := c.FullPath()
 		if route == "" {
-			route = "unknown"
+			// No matched route. For 404s use the raw request path so the
+			// dashboard's "404 endpoints" panel shows the actual endpoint
+			// (spec 4.1) — bounded enough since only misses hit this branch.
+			// Everything else (e.g. SPA fallback 200s) stays "unknown" to keep
+			// label cardinality down.
+			if c.Writer.Status() == http.StatusNotFound {
+				route = c.Request.URL.Path
+			} else {
+				route = "unknown"
+			}
 		}
 		status := strconv.Itoa(c.Writer.Status())
 		httpRequestsTotal.WithLabelValues(c.Request.Method, route, status).Inc()
