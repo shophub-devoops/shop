@@ -144,9 +144,19 @@ func TestCreateOrderRespectsStock(t *testing.T) {
 	}
 
 	// Order within stock → 201, and the stock is reserved immediately (5-2=3).
-	ok := order{ID: "o1", BuyerWallet: "0xBUY", AmountUSDT: "5.00", ItemID: "ord-item", ItemQuantity: 2}
-	if w := do(r, http.MethodPost, "/api/orders", ok); w.Code != http.StatusCreated {
+	// The client-sent amount lies ("0.01"); the server must ignore it and
+	// compute price × qty from the stored item (2.50 × 2 = 5).
+	ok := order{ID: "o1", BuyerWallet: "0xBUY", AmountUSDT: "0.01", ItemID: "ord-item", ItemQuantity: 2}
+	w := do(r, http.MethodPost, "/api/orders", ok)
+	if w.Code != http.StatusCreated {
 		t.Fatalf("valid order = %d (body: %s)", w.Code, w.Body.String())
+	}
+	var created order
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode order: %v", err)
+	}
+	if created.AmountUSDT != "5" {
+		t.Fatalf("amount = %q, want %q (server-computed price × qty)", created.AmountUSDT, "5")
 	}
 	if it := listItemIDs(t, r)["ord-item"]; it.Stock != 3 {
 		t.Fatalf("stock after order = %d, want 3 (reserved at creation)", it.Stock)
@@ -165,7 +175,7 @@ func TestCreateOrderRespectsStock(t *testing.T) {
 	}
 
 	// Orders list includes the successful one.
-	w := do(r, http.MethodGet, "/api/orders", nil)
+	w = do(r, http.MethodGet, "/api/orders", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list orders = %d", w.Code)
 	}
@@ -191,8 +201,8 @@ func TestConfirmIsIdempotent(t *testing.T) {
 		t.Fatalf("seed item: %v", err)
 	}
 	tx := "0xtx"
-	if err := testStore.CreateOrder(ctx, order{
-		ID: "idem-order", BuyerWallet: "0xBUY", TxHash: &tx, AmountUSDT: "6",
+	if _, err := testStore.CreateOrder(ctx, order{
+		ID: "idem-order", BuyerWallet: "0xBUY", TxHash: &tx,
 		ItemID: "idem-item", ItemQuantity: 2,
 	}); err != nil {
 		t.Fatalf("create order: %v", err)
@@ -228,8 +238,8 @@ func TestFailOrderRestoresStock(t *testing.T) {
 		`INSERT INTO items (id, name, price_usdt, stock) VALUES ('fail-item','Fail','3'::numeric,5)`); err != nil {
 		t.Fatalf("seed item: %v", err)
 	}
-	if err := testStore.CreateOrder(ctx, order{
-		ID: "fail-order", BuyerWallet: "0xBUY", AmountUSDT: "6",
+	if _, err := testStore.CreateOrder(ctx, order{
+		ID: "fail-order", BuyerWallet: "0xBUY",
 		ItemID: "fail-item", ItemQuantity: 2,
 	}); err != nil {
 		t.Fatalf("create order: %v", err)

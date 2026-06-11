@@ -165,40 +165,47 @@ func (s *postgresStore) GetOrder(ctx context.Context, id string) (order, error) 
 
 // CreateOrder reserves stock and records the pending order in one transaction:
 // the guarded UPDATE only matches when enough stock remains, so two concurrent
-// buyers can never reserve the same units (no oversell).
-func (s *postgresStore) CreateOrder(ctx context.Context, o order) error {
+// buyers can never reserve the same units (no oversell). RETURNING hands back
+// the stored price so the order amount is computed server-side (price × qty);
+// the client-supplied amount is never trusted.
+func (s *postgresStore) CreateOrder(ctx context.Context, o order) (order, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return order{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	tag, err := tx.Exec(ctx,
-		`UPDATE items SET stock = stock - $1 WHERE id = $2 AND stock >= $1`,
-		o.ItemQuantity, o.ItemID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
+	var price string
+	err = tx.QueryRow(ctx,
+		`UPDATE items SET stock = stock - $1 WHERE id = $2 AND stock >= $1 RETURNING price_usdt::text`,
+		o.ItemQuantity, o.ItemID).Scan(&price)
+	if errors.Is(err, pgx.ErrNoRows) {
 		// Either the item doesn't exist or there isn't enough stock.
 		var exists bool
 		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM items WHERE id = $1)`, o.ItemID).Scan(&exists); err != nil {
-			return err
+			return order{}, err
 		}
 		if !exists {
-			return errNotFound
+			return order{}, errNotFound
 		}
-		return errInsufficientStock
+		return order{}, errInsufficientStock
+	}
+	if err != nil {
+		return order{}, err
 	}
 
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO orders (id, buyer_wallet, tx_hash, amount_usdt, item_id, item_quantity, status)
-		 VALUES ($1, $2, $3, $4::numeric, $5, $6, 'pending')`,
-		o.ID, o.BuyerWallet, o.TxHash, o.AmountUSDT, o.ItemID, o.ItemQuantity); err != nil {
-		return err
+	if o.AmountUSDT, err = orderTotal(price, o.ItemQuantity); err != nil {
+		return order{}, err
 	}
-	return tx.Commit(ctx)
+	o.Status = "pending"
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO orders (id, buyer_wallet, tx_hash, amount_usdt, item_id, item_quantity, status)
+		 VALUES ($1, $2, $3, $4::numeric, $5, $6, 'pending') RETURNING created_at`,
+		o.ID, o.BuyerWallet, o.TxHash, o.AmountUSDT, o.ItemID, o.ItemQuantity).Scan(&o.CreatedAt); err != nil {
+		return order{}, err
+	}
+	return o, tx.Commit(ctx)
 }
 
 func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, error) {
