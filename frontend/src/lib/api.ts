@@ -35,11 +35,12 @@ export type ShopInfo = {
   chain_id: number;
 };
 
+// NewOrder has no tx_hash (the storefront reserves stock first, pays, then
+// attaches the resulting transaction hash via api.attachTx) and no amount —
+// the backend computes it from the stored item price × quantity.
 export type NewOrder = {
   id: string;
   buyer_wallet: string;
-  tx_hash: string;
-  amount_usdt: string;
   item_id: string;
   item_quantity: number;
 };
@@ -100,5 +101,7 @@ export const api = {
   getOrder: (id: string) => request<Order>(`/api/orders/${id}`),
   createOrder: (order: NewOrder) =>
     request<Order>('/api/orders', { method: 'POST', body: JSON.stringify(order) }),
+  attachTx: (id: string, tx_hash: string) =>
+    request<void>(`/api/orders/${id}/tx`, { method: 'POST', body: JSON.stringify({ tx_hash }) }),
   shopInfo: () => request<ShopInfo>('/api/shop-info'),
 };

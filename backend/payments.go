@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"time"
 
@@ -63,9 +64,9 @@ func (p *paymentVerifier) sweep(ctx context.Context) {
 		if p.v == nil {
 			continue // no on-chain config — leave paid orders pending
 		}
-		minAmount, err := toBaseUnits(o.amount, p.decimals)
+		minAmount, err := p.requiredForTx(ctx, o.txHash)
 		if err != nil {
-			slog.Error("amount parse", "order", o.id, "err", err)
+			slog.Error("amount sum", "order", o.id, "err", err)
 			continue
 		}
 		st, err := p.v.verify(ctx, o.txHash, minAmount)
@@ -86,6 +87,28 @@ func (p *paymentVerifier) sweep(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// requiredForTx sums the amounts of every non-failed order referencing the
+// same transaction. One cart checkout legitimately records several orders
+// sharing a tx (the buyer pays the cart total in a single transfer), so the
+// transfer must cover their sum — and a replayed tx hash can never pay for
+// more orders than the original transfer covered: an extra order pushes the
+// sum past the on-chain amount and fails verification.
+func (p *paymentVerifier) requiredForTx(ctx context.Context, txHash string) (*big.Int, error) {
+	amounts, err := p.store.ListActiveAmountsForTx(ctx, txHash)
+	if err != nil {
+		return nil, err
+	}
+	total := new(big.Int)
+	for _, a := range amounts {
+		v, err := toBaseUnits(a, p.decimals)
+		if err != nil {
+			return nil, err
+		}
+		total.Add(total, v)
+	}
+	return total, nil
 }
 
 // shopInfo exposes the on-chain payment parameters the frontend needs to build

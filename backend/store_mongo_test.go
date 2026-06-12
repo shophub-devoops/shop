@@ -123,4 +123,35 @@ func TestMongoStore(t *testing.T) {
 	if items, _ := store.ListItems(ctx); items[0].Stock != 10 {
 		t.Errorf("stock = %d, want 10 (restored exactly once)", items[0].Stock)
 	}
+
+	// Reserve → pay → attach: the tx hash attaches to a pending unpaid order
+	// exactly once, and never to a settled one.
+	if _, err := store.CreateOrder(ctx, order{ID: "ord-attach", BuyerWallet: "0xBUY", ItemID: "m1", ItemQuantity: 1}); err != nil {
+		t.Fatalf("create unpaid order: %v", err)
+	}
+	if err := store.SetOrderTx(ctx, "ord-attach", "0xpay"); err != nil {
+		t.Fatalf("attach tx: %v", err)
+	}
+	if err := store.SetOrderTx(ctx, "ord-attach", "0xother"); !errors.Is(err, errNotFound) {
+		t.Fatalf("re-attach = %v, want errNotFound", err)
+	}
+	if err := store.SetOrderTx(ctx, "ord-ok", "0xother"); !errors.Is(err, errNotFound) {
+		t.Fatalf("attach to settled order = %v, want errNotFound", err)
+	}
+	if o, _ := store.GetOrder(ctx, "ord-attach"); o.TxHash == nil || *o.TxHash != "0xpay" {
+		t.Errorf("tx after attach = %v, want 0xpay", o.TxHash)
+	}
+
+	// Replay accounting: non-failed orders sharing a tx hash are summed by the
+	// verifier; failed ones drop out of the sum. The amount is server-computed
+	// from the item price (9.99 × 1).
+	if amounts, err := store.ListActiveAmountsForTx(ctx, "0xpay"); err != nil || len(amounts) != 1 || amounts[0] != "9.99" {
+		t.Fatalf("active amounts = %v, err %v, want [9.99]", amounts, err)
+	}
+	if err := store.FailOrder(ctx, "ord-attach", "m1", 1); err != nil {
+		t.Fatalf("fail attached order: %v", err)
+	}
+	if amounts, _ := store.ListActiveAmountsForTx(ctx, "0xpay"); len(amounts) != 0 {
+		t.Fatalf("active amounts after fail = %v, want empty", amounts)
+	}
 }

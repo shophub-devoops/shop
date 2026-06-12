@@ -50,6 +50,35 @@ func getOrder(s Store) gin.HandlerFunc {
 	}
 }
 
+type attachTxRequest struct {
+	TxHash string `json:"tx_hash" binding:"required"`
+}
+
+// attachOrderTx records the payment transaction for a pending, unpaid order.
+// The storefront creates orders first (reserving stock), then pays, then
+// attaches the resulting hash here for the background verifier to confirm.
+// The conditional store update makes the attach one-shot: a settled or
+// already-paid order cannot have its hash swapped.
+func attachOrderTx(s Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var in attachTxRequest
+		if err := c.ShouldBindJSON(&in); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		err := s.SetOrderTx(c.Request.Context(), c.Param("id"), in.TxHash)
+		if errors.Is(err, errNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "no pending unpaid order with that id"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+}
+
 // createOrder records a pending order. tx_hash may be empty here; Web3 payment
 // verification (D12) confirms it later via the background sweep once MetaMask
 // returns a hash to the frontend.
