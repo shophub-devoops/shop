@@ -208,6 +208,40 @@ func (s *postgresStore) CreateOrder(ctx context.Context, o order) (order, error)
 	return o, tx.Commit(ctx)
 }
 
+// SetOrderTx is conditional on "pending and unpaid" so a hash can be attached
+// exactly once — a second attempt (or an attempt on a settled order) is a 404.
+func (s *postgresStore) SetOrderTx(ctx context.Context, orderID, txHash string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE orders SET tx_hash = $1 WHERE id = $2 AND status = 'pending' AND tx_hash IS NULL`,
+		txHash, orderID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errNotFound
+	}
+	return nil
+}
+
+func (s *postgresStore) ListActiveAmountsForTx(ctx context.Context, txHash string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT amount_usdt::text FROM orders WHERE tx_hash = $1 AND status <> 'failed'`, txHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, COALESCE(tx_hash, ''), amount_usdt::text, COALESCE(item_id, ''),

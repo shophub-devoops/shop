@@ -173,6 +173,38 @@ func (s *mongoStore) CreateOrder(ctx context.Context, o order) (order, error) {
 	return o, nil
 }
 
+// SetOrderTx is conditional on "pending and unpaid" so a hash can be attached
+// exactly once — a second attempt (or an attempt on a settled order) is a 404.
+// "tx_hash": nil matches both a null and a missing field.
+func (s *mongoStore) SetOrderTx(ctx context.Context, orderID, txHash string) error {
+	res, err := s.orders.UpdateOne(ctx,
+		bson.M{"_id": orderID, "status": "pending", "tx_hash": nil},
+		bson.M{"$set": bson.M{"tx_hash": txHash}})
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return errNotFound
+	}
+	return nil
+}
+
+func (s *mongoStore) ListActiveAmountsForTx(ctx context.Context, txHash string) ([]string, error) {
+	cur, err := s.orders.Find(ctx, bson.M{"tx_hash": txHash, "status": bson.M{"$ne": "failed"}})
+	if err != nil {
+		return nil, err
+	}
+	var orders []order
+	if err := cur.All(ctx, &orders); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(orders))
+	for _, o := range orders {
+		out = append(out, o.AmountUSDT)
+	}
+	return out, nil
+}
+
 func (s *mongoStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, error) {
 	cur, err := s.orders.Find(ctx, bson.M{"status": "pending"})
 	if err != nil {

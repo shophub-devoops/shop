@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -271,6 +272,98 @@ func TestFailOrderRestoresStock(t *testing.T) {
 	}
 	if status != "failed" {
 		t.Errorf("status = %q, want failed", status)
+	}
+}
+
+// TestAttachTxFlow covers the reserve → pay → attach sequence: the tx hash can
+// be attached to a pending unpaid order exactly once, and never to one that is
+// already paid or settled.
+func TestAttachTxFlow(t *testing.T) {
+	r := buildRouter(testStore, config{TokenDecimals: 6})
+
+	seed := item{ID: "attach-item", Name: "Attach", Price: "4.00", Stock: 5}
+	if w := do(r, http.MethodPost, "/api/items", seed); w.Code != http.StatusCreated {
+		t.Fatalf("seed item = %d", w.Code)
+	}
+	o := order{ID: "attach-1", BuyerWallet: "0xBUY", AmountUSDT: "8.00", ItemID: "attach-item", ItemQuantity: 2}
+	if w := do(r, http.MethodPost, "/api/orders", o); w.Code != http.StatusCreated {
+		t.Fatalf("create order = %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	// First attach → 204; the hash is visible on the order afterwards.
+	if w := do(r, http.MethodPost, "/api/orders/attach-1/tx", gin.H{"tx_hash": "0xattach"}); w.Code != http.StatusNoContent {
+		t.Fatalf("attach tx = %d (body: %s)", w.Code, w.Body.String())
+	}
+	w := do(r, http.MethodGet, "/api/orders/attach-1", nil)
+	var got order
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.TxHash == nil || *got.TxHash != "0xattach" {
+		t.Fatalf("order after attach = %+v (err %v), want tx 0xattach", got, err)
+	}
+
+	// Re-attach and attach-to-unknown both 404.
+	if w := do(r, http.MethodPost, "/api/orders/attach-1/tx", gin.H{"tx_hash": "0xother"}); w.Code != http.StatusNotFound {
+		t.Fatalf("re-attach = %d, want 404", w.Code)
+	}
+	if w := do(r, http.MethodPost, "/api/orders/ghost/tx", gin.H{"tx_hash": "0xother"}); w.Code != http.StatusNotFound {
+		t.Fatalf("attach to unknown order = %d, want 404", w.Code)
+	}
+}
+
+// TestRequiredForTxBlocksReplay guards the replay protection: the verifier
+// requires a transfer to cover the SUM of all non-failed orders sharing its tx
+// hash, so a hash that already paid for a cart can't be reused to "pay" for a
+// new order.
+func TestRequiredForTxBlocksReplay(t *testing.T) {
+	ctx := context.Background()
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO items (id, name, price_usdt, stock) VALUES ('replay-item','Replay','5'::numeric,10)`); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+	tx := "0xreplay"
+	// A legit two-line cart paid by one 15 USDT transfer (amounts are computed
+	// server-side from the 5 USDT item price: 1×5 + 2×5).
+	for _, o := range []order{
+		{ID: "replay-1", BuyerWallet: "0xBUY", TxHash: &tx, ItemID: "replay-item", ItemQuantity: 1},
+		{ID: "replay-2", BuyerWallet: "0xBUY", TxHash: &tx, ItemID: "replay-item", ItemQuantity: 2},
+	} {
+		if _, err := testStore.CreateOrder(ctx, o); err != nil {
+			t.Fatalf("create %s: %v", o.ID, err)
+		}
+	}
+
+	pv := &paymentVerifier{store: testStore, decimals: 6}
+	paid := big.NewInt(15_000_000) // what the on-chain transfer actually moved
+
+	required, err := pv.requiredForTx(ctx, tx)
+	if err != nil {
+		t.Fatalf("requiredForTx: %v", err)
+	}
+	if required.Cmp(paid) > 0 {
+		t.Fatalf("legit cart required %s > paid %s, want covered", required, paid)
+	}
+
+	// Replaying the hash on a third order pushes the sum past the transfer.
+	if _, err := testStore.CreateOrder(ctx, order{
+		ID: "replay-3", BuyerWallet: "0xEVIL", TxHash: &tx,
+		ItemID: "replay-item", ItemQuantity: 1,
+	}); err != nil {
+		t.Fatalf("create replay-3: %v", err)
+	}
+	required, err = pv.requiredForTx(ctx, tx)
+	if err != nil {
+		t.Fatalf("requiredForTx after replay: %v", err)
+	}
+	if required.Cmp(paid) <= 0 {
+		t.Fatalf("replayed required %s <= paid %s, want blocked", required, paid)
+	}
+
+	// Failing the replayed order takes it back out of the sum.
+	if err := testStore.FailOrder(ctx, "replay-3", "replay-item", 1); err != nil {
+		t.Fatalf("fail replay-3: %v", err)
+	}
+	required, _ = pv.requiredForTx(ctx, tx)
+	if required.Cmp(paid) > 0 {
+		t.Fatalf("required after fail %s > paid %s, want covered again", required, paid)
 	}
 }
 

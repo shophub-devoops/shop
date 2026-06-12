@@ -108,8 +108,11 @@ export default function Storefront() {
     setStatus('Still pending — the order will confirm once the transaction is mined.');
   }
 
-  // checkout pays the whole cart total in a single USDT transfer, then records
-  // one order per cart line sharing that transaction hash.
+  // checkout reserves stock first (one pending order per cart line), then pays
+  // the whole cart total in a single USDT transfer, then attaches the tx hash
+  // to the orders so the backend verifier can confirm them on-chain. Paying
+  // after the reservation means the buyer can never pay for items that ran out
+  // between cart and checkout; abandoned reservations expire server-side.
   async function checkout() {
     if (cartLines.length === 0) return;
     setBusy(true);
@@ -121,23 +124,24 @@ export default function Storefront() {
       }
 
       const info = await api.shopInfo();
-      setStatus('Confirm the payment in MetaMask…');
-      const txHash = await payUSDT(info, total.toFixed(2));
-
-      setStatus('Payment sent — recording order…');
+      setStatus('Reserving your items…');
       const ids: string[] = [];
       for (const line of cartLines) {
         const id = crypto.randomUUID();
-        ids.push(id);
         await api.createOrder({
           id,
           buyer_wallet: acct,
-          tx_hash: txHash,
-          amount_usdt: (Number(line.item.price_usdt) * line.qty).toFixed(2),
           item_id: line.item.id,
           item_quantity: line.qty,
         });
+        ids.push(id);
       }
+
+      setStatus('Confirm the payment in MetaMask…');
+      const txHash = await payUSDT(info, total.toFixed(2));
+
+      setStatus('Payment sent — recording transaction…');
+      await Promise.all(ids.map((id) => api.attachTx(id, txHash)));
 
       setStatus('Waiting for on-chain confirmation…');
       await pollOrders(ids);

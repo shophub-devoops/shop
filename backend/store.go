@@ -50,6 +50,15 @@ type Store interface {
 	// — never trusted from the client — and returned in the persisted order so
 	// the payment verifier checks the real total.
 	CreateOrder(ctx context.Context, o order) (order, error)
+	// SetOrderTx attaches the payment transaction hash to a pending order that
+	// has none yet (the storefront reserves stock first, then pays, then
+	// attaches the resulting hash). Returns errNotFound when there is no
+	// pending, unpaid order with that id.
+	SetOrderTx(ctx context.Context, orderID, txHash string) error
+	// ListActiveAmountsForTx returns amount_usdt of every non-failed order
+	// referencing txHash. The payment verifier sums these, so one transaction
+	// can never cover more orders than it actually paid for (replay protection).
+	ListActiveAmountsForTx(ctx context.Context, txHash string) ([]string, error)
 
 	ListPendingOrders(ctx context.Context) ([]pendingOrder, error)
 	// ConfirmOrder flips a pending order to confirmed exactly once, even across

@@ -129,6 +129,8 @@ func buildRouter(store Store, cfg config) http.Handler {
 		orders.GET("", admin.require(), listOrders(store))
 		orders.POST("", createOrder(store))
 		orders.GET("/:id", getOrder(store))
+		// Buyer attaches the payment tx hash after paying (reserve → pay → attach).
+		orders.POST("/:id/tx", attachOrderTx(store))
 	}
 
 	mountStorefront(r)
