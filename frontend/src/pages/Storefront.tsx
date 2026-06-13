@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { parseUnits } from 'ethers';
 import { Search, ShoppingCart, Trash2, Wallet } from 'lucide-react';
 import { api, fmtUsdt, type Item } from '../lib/api';
 import { connectWallet, payUSDT } from '../lib/web3';
@@ -126,19 +127,25 @@ export default function Storefront() {
       const info = await api.shopInfo();
       setStatus('Reserving your items…');
       const ids: string[] = [];
+      // Sum the backend-computed order amounts (price × qty, server-side) into
+      // exact base units. Paying this — not the display-rounded cart total —
+      // guarantees the on-chain transfer matches what the verifier expects to
+      // the unit, so payments with sub-cent prices can't fail verification.
+      let totalBaseUnits = 0n;
       for (const line of cartLines) {
         const id = crypto.randomUUID();
-        await api.createOrder({
+        const created = await api.createOrder({
           id,
           buyer_wallet: acct,
           item_id: line.item.id,
           item_quantity: line.qty,
         });
+        totalBaseUnits += parseUnits(created.amount_usdt, info.token_decimals);
         ids.push(id);
       }
 
       setStatus('Confirm the payment in MetaMask…');
-      const txHash = await payUSDT(info, total.toFixed(2));
+      const txHash = await payUSDT(info, totalBaseUnits);
 
       setStatus('Payment sent — recording transaction…');
       await Promise.all(ids.map((id) => api.attachTx(id, txHash)));
