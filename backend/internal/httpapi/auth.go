@@ -1,4 +1,4 @@
-package main
+package httpapi
 
 import (
 	"crypto/sha256"
@@ -24,7 +24,9 @@ type adminAuth struct {
 	key      []byte
 }
 
-func newAdminAuth(password string) *adminAuth {
+// NewAdminAuth returns a gate for the given password, or nil (pass-through) when
+// the password is empty.
+func NewAdminAuth(password string) *adminAuth {
 	if password == "" {
 		return nil
 	}

@@ -1,4 +1,6 @@
-package main
+// Package payment confirms ERC-20 (USDT) payments to a Shop's wallet on Sepolia
+// and drives the order-settlement sweep that reserves/releases stock.
+package payment
 
 import (
 	"context"
@@ -11,6 +13,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+
+	"github.com/shophub-devoops/shop/backend/internal/config"
 )
 
 // transferSig is the ERC-20 Transfer(address,address,uint256) event topic.
@@ -24,14 +28,14 @@ const (
 	statusFailed    paymentStatus = "failed"
 )
 
-// verifier confirms an ERC-20 payment to the shop's wallet on Sepolia.
-type verifier struct {
+// Verifier confirms an ERC-20 payment to the shop's wallet on Sepolia.
+type Verifier struct {
 	client    *ethclient.Client
 	token     common.Address
 	recipient common.Address
 }
 
-func newVerifier(cfg config) (*verifier, error) {
+func NewVerifier(cfg config.Config) (*Verifier, error) {
 	if cfg.WalletAddress == "" {
 		return nil, fmt.Errorf("WALLET_ADDRESS not set")
 	}
@@ -39,7 +43,7 @@ func newVerifier(cfg config) (*verifier, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", cfg.RPCURL, err)
 	}
-	return &verifier{
+	return &Verifier{
 		client:    client,
 		token:     common.HexToAddress(cfg.TokenContract),
 		recipient: common.HexToAddress(cfg.WalletAddress),
@@ -49,7 +53,7 @@ func newVerifier(cfg config) (*verifier, error) {
 // verify inspects txHash's receipt and reports whether it carries an ERC-20
 // Transfer of at least minAmount (base units) to the shop wallet. A tx that is
 // not yet mined returns statusPending with no error so the caller can retry.
-func (v *verifier) verify(ctx context.Context, txHash string, minAmount *big.Int) (paymentStatus, error) {
+func (v *Verifier) verify(ctx context.Context, txHash string, minAmount *big.Int) (paymentStatus, error) {
 	receipt, err := v.client.TransactionReceipt(ctx, common.HexToHash(txHash))
 	if errors.Is(err, ethereum.NotFound) {
 		return statusPending, nil
@@ -84,10 +88,10 @@ func matchingTransfer(logs []*types.Log, token, recipient common.Address, minAmo
 	return false
 }
 
-// toBaseUnits converts a decimal token amount ("5", "5.5") to integer base units
+// ToBaseUnits converts a decimal token amount ("5", "5.5") to integer base units
 // for the given decimals (5.5 @ 6 decimals -> 5500000). Sub-unit precision is
 // floored away.
-func toBaseUnits(amount string, decimals int) (*big.Int, error) {
+func ToBaseUnits(amount string, decimals int) (*big.Int, error) {
 	r, ok := new(big.Rat).SetString(amount)
 	if !ok {
 		return nil, fmt.Errorf("invalid amount %q", amount)

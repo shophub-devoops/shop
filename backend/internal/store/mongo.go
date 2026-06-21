@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -14,7 +14,7 @@ import (
 
 // mongoStore is the MongoDB community-operator / "light" database implementation
 // of Store. Items and orders map to two collections keyed by their id (_id);
-// the same item/order structs (bson-tagged) are persisted directly.
+// the same Item/Order structs (bson-tagged) are persisted directly.
 type mongoStore struct {
 	client *mongo.Client
 	items  *mongo.Collection
@@ -59,12 +59,12 @@ func (s *mongoStore) Ping(ctx context.Context) error {
 // items/orders are keyed by _id, so no DDL or index setup is required.
 func (s *mongoStore) EnsureSchema(_ context.Context) error { return nil }
 
-func (s *mongoStore) ListItems(ctx context.Context) ([]item, error) {
+func (s *mongoStore) ListItems(ctx context.Context) ([]Item, error) {
 	cur, err := s.items.Find(ctx, bson.M{})
 	if err != nil {
 		return nil, err
 	}
-	out := []item{}
+	out := []Item{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}
@@ -72,12 +72,12 @@ func (s *mongoStore) ListItems(ctx context.Context) ([]item, error) {
 	return out, nil
 }
 
-func (s *mongoStore) CreateItem(ctx context.Context, it item) error {
+func (s *mongoStore) CreateItem(ctx context.Context, it Item) error {
 	_, err := s.items.InsertOne(ctx, it)
 	return err
 }
 
-func (s *mongoStore) UpdateItem(ctx context.Context, id string, it item) error {
+func (s *mongoStore) UpdateItem(ctx context.Context, id string, it Item) error {
 	res, err := s.items.UpdateByID(ctx, id, bson.M{"$set": bson.M{
 		"name":       it.Name,
 		"price_usdt": it.Price,
@@ -87,7 +87,7 @@ func (s *mongoStore) UpdateItem(ctx context.Context, id string, it item) error {
 		return err
 	}
 	if res.MatchedCount == 0 {
-		return errNotFound
+		return ErrNotFound
 	}
 	return nil
 }
@@ -98,17 +98,17 @@ func (s *mongoStore) DeleteItem(ctx context.Context, id string) error {
 		return err
 	}
 	if res.DeletedCount == 0 {
-		return errNotFound
+		return ErrNotFound
 	}
 	return nil
 }
 
-func (s *mongoStore) ListOrders(ctx context.Context) ([]order, error) {
+func (s *mongoStore) ListOrders(ctx context.Context) ([]Order, error) {
 	cur, err := s.orders.Find(ctx, bson.M{})
 	if err != nil {
 		return nil, err
 	}
-	out := []order{}
+	out := []Order{}
 	if err := cur.All(ctx, &out); err != nil {
 		return nil, err
 	}
@@ -116,11 +116,11 @@ func (s *mongoStore) ListOrders(ctx context.Context) ([]order, error) {
 	return out, nil
 }
 
-func (s *mongoStore) GetOrder(ctx context.Context, id string) (order, error) {
-	var o order
+func (s *mongoStore) GetOrder(ctx context.Context, id string) (Order, error) {
+	var o Order
 	err := s.orders.FindOne(ctx, bson.M{"_id": id}).Decode(&o)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return order{}, errNotFound
+		return Order{}, ErrNotFound
 	}
 	return o, err
 }
@@ -131,7 +131,7 @@ func (s *mongoStore) GetOrder(ctx context.Context, id string) (order, error) {
 // FindOneAndUpdate returns the matched item, whose stored price is used to
 // compute the order amount server-side (price × qty); the client-supplied
 // amount is never trusted.
-func (s *mongoStore) CreateOrder(ctx context.Context, o order) (order, error) {
+func (s *mongoStore) CreateOrder(ctx context.Context, o Order) (Order, error) {
 	dec := s.items.FindOneAndUpdate(ctx,
 		bson.M{"_id": o.ItemID, "stock": bson.M{"$gte": o.ItemQuantity}},
 		bson.M{"$inc": bson.M{"stock": -o.ItemQuantity}})
@@ -139,27 +139,27 @@ func (s *mongoStore) CreateOrder(ctx context.Context, o order) (order, error) {
 		// Either the item doesn't exist or there isn't enough stock.
 		err := s.items.FindOne(ctx, bson.M{"_id": o.ItemID}).Err()
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return order{}, errNotFound
+			return Order{}, ErrNotFound
 		}
 		if err != nil {
-			return order{}, err
+			return Order{}, err
 		}
-		return order{}, errInsufficientStock
+		return Order{}, ErrInsufficientStock
 	}
 	if dec.Err() != nil {
-		return order{}, dec.Err()
+		return Order{}, dec.Err()
 	}
 
-	var it item
+	var it Item
 	if err := dec.Decode(&it); err != nil {
 		// Roll the reservation back so a failed decode doesn't leak stock.
 		_, _ = s.items.UpdateByID(ctx, o.ItemID, bson.M{"$inc": bson.M{"stock": o.ItemQuantity}})
-		return order{}, err
+		return Order{}, err
 	}
-	amount, err := orderTotal(it.Price, o.ItemQuantity)
+	amount, err := OrderTotal(it.Price, o.ItemQuantity)
 	if err != nil {
 		_, _ = s.items.UpdateByID(ctx, o.ItemID, bson.M{"$inc": bson.M{"stock": o.ItemQuantity}})
-		return order{}, err
+		return Order{}, err
 	}
 
 	o.AmountUSDT = amount
@@ -168,7 +168,7 @@ func (s *mongoStore) CreateOrder(ctx context.Context, o order) (order, error) {
 	if _, err := s.orders.InsertOne(ctx, o); err != nil {
 		// Roll the reservation back so a failed insert doesn't leak stock.
 		_, _ = s.items.UpdateByID(ctx, o.ItemID, bson.M{"$inc": bson.M{"stock": o.ItemQuantity}})
-		return order{}, err
+		return Order{}, err
 	}
 	return o, nil
 }
@@ -184,7 +184,7 @@ func (s *mongoStore) SetOrderTx(ctx context.Context, orderID, txHash string) err
 		return err
 	}
 	if res.MatchedCount == 0 {
-		return errNotFound
+		return ErrNotFound
 	}
 	return nil
 }
@@ -194,7 +194,7 @@ func (s *mongoStore) ListActiveAmountsForTx(ctx context.Context, txHash string) 
 	if err != nil {
 		return nil, err
 	}
-	var orders []order
+	var orders []Order
 	if err := cur.All(ctx, &orders); err != nil {
 		return nil, err
 	}
@@ -205,24 +205,24 @@ func (s *mongoStore) ListActiveAmountsForTx(ctx context.Context, txHash string) 
 	return out, nil
 }
 
-func (s *mongoStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, error) {
+func (s *mongoStore) ListPendingOrders(ctx context.Context) ([]PendingOrder, error) {
 	cur, err := s.orders.Find(ctx, bson.M{"status": "pending"})
 	if err != nil {
 		return nil, err
 	}
-	var orders []order
+	var orders []Order
 	if err := cur.All(ctx, &orders); err != nil {
 		return nil, err
 	}
-	out := make([]pendingOrder, 0, len(orders))
+	out := make([]PendingOrder, 0, len(orders))
 	for _, o := range orders {
 		tx := ""
 		if o.TxHash != nil {
 			tx = *o.TxHash
 		}
-		out = append(out, pendingOrder{
-			id: o.ID, txHash: tx, amount: o.AmountUSDT, itemID: o.ItemID, qty: o.ItemQuantity,
-			createdAt: o.CreatedAt,
+		out = append(out, PendingOrder{
+			ID: o.ID, TxHash: tx, Amount: o.AmountUSDT, ItemID: o.ItemID, Qty: o.ItemQuantity,
+			CreatedAt: o.CreatedAt,
 		})
 	}
 	return out, nil
