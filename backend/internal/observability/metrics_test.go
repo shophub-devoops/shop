@@ -1,9 +1,11 @@
-package main
+package observability
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -11,10 +13,15 @@ import (
 // metric: a request that matches no route must be counted under its raw URL
 // path (not "unknown"), so the dashboard's 404 panel can show the endpoint.
 func Test404MetricCarriesEndpoint(t *testing.T) {
-	r := buildRouter(testStore, config{TokenDecimals: 6})
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(Middleware())
 
 	const missing = "/no/such/endpoint"
-	if w := do(r, http.MethodGet, missing, nil); w.Code != http.StatusNotFound {
+	req := httptest.NewRequest(http.MethodGet, missing, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
 		t.Fatalf("unmatched route = %d, want 404", w.Code)
 	}
 

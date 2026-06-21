@@ -1,20 +1,15 @@
-package main
+package httpapi
 
 import (
 	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/shophub-devoops/shop/backend/internal/store"
 )
 
-type item struct {
-	ID    string `json:"id" bson:"_id"`
-	Name  string `json:"name" binding:"required" bson:"name"`
-	Price string `json:"price_usdt" binding:"required" bson:"price_usdt"`
-	Stock int    `json:"stock" bson:"stock"`
-}
-
-func listItems(s Store) gin.HandlerFunc {
+func listItems(s store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		out, err := s.ListItems(c.Request.Context())
 		if err != nil {
@@ -25,9 +20,9 @@ func listItems(s Store) gin.HandlerFunc {
 	}
 }
 
-func createItem(s Store) gin.HandlerFunc {
+func createItem(s store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var in item
+		var in store.Item
 		if err := c.ShouldBindJSON(&in); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -44,16 +39,16 @@ func createItem(s Store) gin.HandlerFunc {
 	}
 }
 
-func updateItem(s Store) gin.HandlerFunc {
+func updateItem(s store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.Param("id")
-		var in item
+		var in store.Item
 		if err := c.ShouldBindJSON(&in); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		err := s.UpdateItem(c.Request.Context(), id, in)
-		if errors.Is(err, errNotFound) {
+		if errors.Is(err, store.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "item not found"})
 			return
 		}
@@ -66,10 +61,10 @@ func updateItem(s Store) gin.HandlerFunc {
 	}
 }
 
-func deleteItem(s Store) gin.HandlerFunc {
+func deleteItem(s store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		err := s.DeleteItem(c.Request.Context(), c.Param("id"))
-		if errors.Is(err, errNotFound) {
+		if errors.Is(err, store.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "item not found"})
 			return
 		}

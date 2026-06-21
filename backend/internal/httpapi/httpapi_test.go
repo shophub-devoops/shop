@@ -1,4 +1,4 @@
-package main
+package httpapi
 
 import (
 	"bytes"
@@ -17,13 +17,18 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/shophub-devoops/shop/backend/internal/config"
+	"github.com/shophub-devoops/shop/backend/internal/payment"
+	"github.com/shophub-devoops/shop/backend/internal/store"
 )
 
 // testStore is a Postgres-backed Store over a throwaway Postgres started once
 // for the package (Testcontainers — spec 5.2 integration-test infrastructure).
-// testPool is the same connection, kept for raw SQL seeding in tests.
+// testPool is an independent connection to the same database, kept for raw SQL
+// seeding/assertions in tests.
 var (
-	testStore Store
+	testStore store.Store
 	testPool  *pgxpool.Pool
 )
 
@@ -48,12 +53,14 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		log.Fatalf("conn string: %v", err)
 	}
-	store, err := newPostgresStore(ctx, dsn)
+	testStore, err = store.New(ctx, dsn, "")
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
-	testStore = store
-	testPool = store.pool
+	testPool, err = pgxpool.New(ctx, dsn)
+	if err != nil {
+		log.Fatalf("pool: %v", err)
+	}
 
 	if err := testStore.EnsureSchema(ctx); err != nil {
 		log.Fatalf("ensure schema: %v", err)
@@ -61,6 +68,7 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
+	testPool.Close()
 	testStore.Close()
 	_ = pg.Terminate(ctx)
 	os.Exit(code)
@@ -78,17 +86,17 @@ func do(r http.Handler, method, path string, body any) *httptest.ResponseRecorde
 	return w
 }
 
-func listItemIDs(t *testing.T, r http.Handler) map[string]item {
+func listItemIDs(t *testing.T, r http.Handler) map[string]store.Item {
 	t.Helper()
 	w := do(r, http.MethodGet, "/api/items", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list items = %d", w.Code)
 	}
-	var items []item
+	var items []store.Item
 	if err := json.Unmarshal(w.Body.Bytes(), &items); err != nil {
 		t.Fatalf("decode items: %v", err)
 	}
-	out := map[string]item{}
+	out := map[string]store.Item{}
 	for _, it := range items {
 		out[it.ID] = it
 	}
@@ -96,21 +104,18 @@ func listItemIDs(t *testing.T, r http.Handler) map[string]item {
 }
 
 func TestItemCRUD(t *testing.T) {
-	r := buildRouter(testStore, config{TokenDecimals: 6})
+	r := BuildRouter(testStore, config.Config{TokenDecimals: 6})
 
-	// Create.
-	create := item{ID: "crud-1", Name: "Widget", Price: "9.99", Stock: 5}
+	create := store.Item{ID: "crud-1", Name: "Widget", Price: "9.99", Stock: 5}
 	if w := do(r, http.MethodPost, "/api/items", create); w.Code != http.StatusCreated {
 		t.Fatalf("create item = %d (body: %s)", w.Code, w.Body.String())
 	}
 
-	// List contains it.
 	if it, ok := listItemIDs(t, r)["crud-1"]; !ok || it.Name != "Widget" || it.Stock != 5 {
 		t.Fatalf("created item missing/wrong in list: %+v", it)
 	}
 
-	// Update stock.
-	upd := item{Name: "Widget", Price: "9.99", Stock: 12}
+	upd := store.Item{Name: "Widget", Price: "9.99", Stock: 12}
 	if w := do(r, http.MethodPut, "/api/items/crud-1", upd); w.Code != http.StatusOK {
 		t.Fatalf("update item = %d (body: %s)", w.Code, w.Body.String())
 	}
@@ -118,7 +123,6 @@ func TestItemCRUD(t *testing.T) {
 		t.Fatalf("stock after update = %d, want 12", it.Stock)
 	}
 
-	// Delete.
 	if w := do(r, http.MethodDelete, "/api/items/crud-1", nil); w.Code != http.StatusNoContent {
 		t.Fatalf("delete item = %d", w.Code)
 	}
@@ -128,31 +132,30 @@ func TestItemCRUD(t *testing.T) {
 }
 
 func TestUpdateMissingItemReturns404(t *testing.T) {
-	r := buildRouter(testStore, config{TokenDecimals: 6})
-	upd := item{Name: "Ghost", Price: "1.00", Stock: 1}
+	r := BuildRouter(testStore, config.Config{TokenDecimals: 6})
+	upd := store.Item{Name: "Ghost", Price: "1.00", Stock: 1}
 	if w := do(r, http.MethodPut, "/api/items/does-not-exist", upd); w.Code != http.StatusNotFound {
 		t.Fatalf("update missing item = %d, want 404", w.Code)
 	}
 }
 
 func TestCreateOrderRespectsStock(t *testing.T) {
-	r := buildRouter(testStore, config{TokenDecimals: 6})
+	r := BuildRouter(testStore, config.Config{TokenDecimals: 6})
 
-	// Seed an item with stock 5.
-	seed := item{ID: "ord-item", Name: "Thing", Price: "2.50", Stock: 5}
+	seed := store.Item{ID: "ord-item", Name: "Thing", Price: "2.50", Stock: 5}
 	if w := do(r, http.MethodPost, "/api/items", seed); w.Code != http.StatusCreated {
 		t.Fatalf("seed item = %d", w.Code)
 	}
 
-	// Order within stock → 201, and the stock is reserved immediately (5-2=3).
-	// The client-sent amount lies ("0.01"); the server must ignore it and
-	// compute price × qty from the stored item (2.50 × 2 = 5).
-	ok := order{ID: "o1", BuyerWallet: "0xBUY", AmountUSDT: "0.01", ItemID: "ord-item", ItemQuantity: 2}
+	// Order within stock → 201; the stock is reserved immediately (5-2=3). The
+	// client-sent amount lies ("0.01"); the server must ignore it and compute
+	// price × qty from the stored item (2.50 × 2 = 5).
+	ok := store.Order{ID: "o1", BuyerWallet: "0xBUY", AmountUSDT: "0.01", ItemID: "ord-item", ItemQuantity: 2}
 	w := do(r, http.MethodPost, "/api/orders", ok)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("valid order = %d (body: %s)", w.Code, w.Body.String())
 	}
-	var created order
+	var created store.Order
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode order: %v", err)
 	}
@@ -163,24 +166,21 @@ func TestCreateOrderRespectsStock(t *testing.T) {
 		t.Fatalf("stock after order = %d, want 3 (reserved at creation)", it.Stock)
 	}
 
-	// Order exceeding stock → 409.
-	tooMuch := order{ID: "o2", BuyerWallet: "0xBUY", AmountUSDT: "99.00", ItemID: "ord-item", ItemQuantity: 99}
+	tooMuch := store.Order{ID: "o2", BuyerWallet: "0xBUY", AmountUSDT: "99.00", ItemID: "ord-item", ItemQuantity: 99}
 	if w := do(r, http.MethodPost, "/api/orders", tooMuch); w.Code != http.StatusConflict {
 		t.Fatalf("over-stock order = %d, want 409", w.Code)
 	}
 
-	// Order for unknown item → 404.
-	ghost := order{ID: "o3", BuyerWallet: "0xBUY", AmountUSDT: "1.00", ItemID: "nope", ItemQuantity: 1}
+	ghost := store.Order{ID: "o3", BuyerWallet: "0xBUY", AmountUSDT: "1.00", ItemID: "nope", ItemQuantity: 1}
 	if w := do(r, http.MethodPost, "/api/orders", ghost); w.Code != http.StatusNotFound {
 		t.Fatalf("unknown-item order = %d, want 404", w.Code)
 	}
 
-	// Orders list includes the successful one.
 	w = do(r, http.MethodGet, "/api/orders", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("list orders = %d", w.Code)
 	}
-	var orders []order
+	var orders []store.Order
 	_ = json.Unmarshal(w.Body.Bytes(), &orders)
 	found := false
 	for _, o := range orders {
@@ -202,7 +202,7 @@ func TestConfirmIsIdempotent(t *testing.T) {
 		t.Fatalf("seed item: %v", err)
 	}
 	tx := "0xtx"
-	if _, err := testStore.CreateOrder(ctx, order{
+	if _, err := testStore.CreateOrder(ctx, store.Order{
 		ID: "idem-order", BuyerWallet: "0xBUY", TxHash: &tx,
 		ItemID: "idem-item", ItemQuantity: 2,
 	}); err != nil {
@@ -239,7 +239,7 @@ func TestFailOrderRestoresStock(t *testing.T) {
 		`INSERT INTO items (id, name, price_usdt, stock) VALUES ('fail-item','Fail','3'::numeric,5)`); err != nil {
 		t.Fatalf("seed item: %v", err)
 	}
-	if _, err := testStore.CreateOrder(ctx, order{
+	if _, err := testStore.CreateOrder(ctx, store.Order{
 		ID: "fail-order", BuyerWallet: "0xBUY",
 		ItemID: "fail-item", ItemQuantity: 2,
 	}); err != nil {
@@ -279,28 +279,26 @@ func TestFailOrderRestoresStock(t *testing.T) {
 // be attached to a pending unpaid order exactly once, and never to one that is
 // already paid or settled.
 func TestAttachTxFlow(t *testing.T) {
-	r := buildRouter(testStore, config{TokenDecimals: 6})
+	r := BuildRouter(testStore, config.Config{TokenDecimals: 6})
 
-	seed := item{ID: "attach-item", Name: "Attach", Price: "4.00", Stock: 5}
+	seed := store.Item{ID: "attach-item", Name: "Attach", Price: "4.00", Stock: 5}
 	if w := do(r, http.MethodPost, "/api/items", seed); w.Code != http.StatusCreated {
 		t.Fatalf("seed item = %d", w.Code)
 	}
-	o := order{ID: "attach-1", BuyerWallet: "0xBUY", AmountUSDT: "8.00", ItemID: "attach-item", ItemQuantity: 2}
+	o := store.Order{ID: "attach-1", BuyerWallet: "0xBUY", AmountUSDT: "8.00", ItemID: "attach-item", ItemQuantity: 2}
 	if w := do(r, http.MethodPost, "/api/orders", o); w.Code != http.StatusCreated {
 		t.Fatalf("create order = %d (body: %s)", w.Code, w.Body.String())
 	}
 
-	// First attach → 204; the hash is visible on the order afterwards.
 	if w := do(r, http.MethodPost, "/api/orders/attach-1/tx", gin.H{"tx_hash": "0xattach"}); w.Code != http.StatusNoContent {
 		t.Fatalf("attach tx = %d (body: %s)", w.Code, w.Body.String())
 	}
 	w := do(r, http.MethodGet, "/api/orders/attach-1", nil)
-	var got order
+	var got store.Order
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.TxHash == nil || *got.TxHash != "0xattach" {
 		t.Fatalf("order after attach = %+v (err %v), want tx 0xattach", got, err)
 	}
 
-	// Re-attach and attach-to-unknown both 404.
 	if w := do(r, http.MethodPost, "/api/orders/attach-1/tx", gin.H{"tx_hash": "0xother"}); w.Code != http.StatusNotFound {
 		t.Fatalf("re-attach = %d, want 404", w.Code)
 	}
@@ -320,9 +318,7 @@ func TestRequiredForTxBlocksReplay(t *testing.T) {
 		t.Fatalf("seed item: %v", err)
 	}
 	tx := "0xreplay"
-	// A legit two-line cart paid by one 15 USDT transfer (amounts are computed
-	// server-side from the 5 USDT item price: 1×5 + 2×5).
-	for _, o := range []order{
+	for _, o := range []store.Order{
 		{ID: "replay-1", BuyerWallet: "0xBUY", TxHash: &tx, ItemID: "replay-item", ItemQuantity: 1},
 		{ID: "replay-2", BuyerWallet: "0xBUY", TxHash: &tx, ItemID: "replay-item", ItemQuantity: 2},
 	} {
@@ -331,37 +327,35 @@ func TestRequiredForTxBlocksReplay(t *testing.T) {
 		}
 	}
 
-	pv := &paymentVerifier{store: testStore, decimals: 6}
+	pv := &payment.PaymentVerifier{Store: testStore, Decimals: 6}
 	paid := big.NewInt(15_000_000) // what the on-chain transfer actually moved
 
-	required, err := pv.requiredForTx(ctx, tx)
+	required, err := pv.RequiredForTx(ctx, tx)
 	if err != nil {
-		t.Fatalf("requiredForTx: %v", err)
+		t.Fatalf("RequiredForTx: %v", err)
 	}
 	if required.Cmp(paid) > 0 {
 		t.Fatalf("legit cart required %s > paid %s, want covered", required, paid)
 	}
 
-	// Replaying the hash on a third order pushes the sum past the transfer.
-	if _, err := testStore.CreateOrder(ctx, order{
+	if _, err := testStore.CreateOrder(ctx, store.Order{
 		ID: "replay-3", BuyerWallet: "0xEVIL", TxHash: &tx,
 		ItemID: "replay-item", ItemQuantity: 1,
 	}); err != nil {
 		t.Fatalf("create replay-3: %v", err)
 	}
-	required, err = pv.requiredForTx(ctx, tx)
+	required, err = pv.RequiredForTx(ctx, tx)
 	if err != nil {
-		t.Fatalf("requiredForTx after replay: %v", err)
+		t.Fatalf("RequiredForTx after replay: %v", err)
 	}
 	if required.Cmp(paid) <= 0 {
 		t.Fatalf("replayed required %s <= paid %s, want blocked", required, paid)
 	}
 
-	// Failing the replayed order takes it back out of the sum.
 	if err := testStore.FailOrder(ctx, "replay-3", "replay-item", 1); err != nil {
 		t.Fatalf("fail replay-3: %v", err)
 	}
-	required, _ = pv.requiredForTx(ctx, tx)
+	required, _ = pv.RequiredForTx(ctx, tx)
 	if required.Cmp(paid) > 0 {
 		t.Fatalf("required after fail %s > paid %s, want covered again", required, paid)
 	}
@@ -370,15 +364,13 @@ func TestRequiredForTxBlocksReplay(t *testing.T) {
 // TestAdminAuth verifies the admin gate end-to-end: writes and order listing
 // require a token from /api/auth/login, while catalogue reads stay public.
 func TestAdminAuth(t *testing.T) {
-	r := buildRouter(testStore, config{TokenDecimals: 6, AdminPassword: "s3cret-pass"})
+	r := BuildRouter(testStore, config.Config{TokenDecimals: 6, AdminPassword: "s3cret-pass"})
 
-	// Public reads work without a token.
 	if w := do(r, http.MethodGet, "/api/items", nil); w.Code != http.StatusOK {
 		t.Fatalf("public item list = %d, want 200", w.Code)
 	}
 
-	// Writes and order listing are rejected without a token.
-	it := item{ID: "auth-1", Name: "Locked", Price: "1.00", Stock: 1}
+	it := store.Item{ID: "auth-1", Name: "Locked", Price: "1.00", Stock: 1}
 	if w := do(r, http.MethodPost, "/api/items", it); w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated create = %d, want 401", w.Code)
 	}
@@ -386,12 +378,10 @@ func TestAdminAuth(t *testing.T) {
 		t.Fatalf("unauthenticated order list = %d, want 401", w.Code)
 	}
 
-	// Wrong password → 401.
 	if w := do(r, http.MethodPost, "/api/auth/login", gin.H{"password": "wrong"}); w.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong-password login = %d, want 401", w.Code)
 	}
 
-	// Correct password → token that unlocks admin endpoints.
 	w := do(r, http.MethodPost, "/api/auth/login", gin.H{"password": "s3cret-pass"})
 	if w.Code != http.StatusOK {
 		t.Fatalf("login = %d (body: %s)", w.Code, w.Body.String())

@@ -1,4 +1,4 @@
-package main
+package payment
 
 import (
 	"math/big"
@@ -64,15 +64,15 @@ func TestToBaseUnits(t *testing.T) {
 		{"123.456789", 123_456_789},
 	}
 	for _, tc := range cases {
-		got, err := toBaseUnits(tc.amount, 6)
+		got, err := ToBaseUnits(tc.amount, 6)
 		if err != nil {
-			t.Fatalf("toBaseUnits(%q): %v", tc.amount, err)
+			t.Fatalf("ToBaseUnits(%q): %v", tc.amount, err)
 		}
 		if got.Int64() != tc.want {
-			t.Errorf("toBaseUnits(%q) = %d, want %d", tc.amount, got.Int64(), tc.want)
+			t.Errorf("ToBaseUnits(%q) = %d, want %d", tc.amount, got.Int64(), tc.want)
 		}
 	}
-	if _, err := toBaseUnits("not-a-number", 6); err == nil {
+	if _, err := ToBaseUnits("not-a-number", 6); err == nil {
 		t.Error("expected error for invalid amount")
 	}
 }

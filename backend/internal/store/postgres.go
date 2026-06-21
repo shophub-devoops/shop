@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -77,7 +77,7 @@ func (s *postgresStore) EnsureSchema(ctx context.Context) error {
 	return nil
 }
 
-func (s *postgresStore) ListItems(ctx context.Context) ([]item, error) {
+func (s *postgresStore) ListItems(ctx context.Context) ([]Item, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, name, price_usdt::text, stock FROM items ORDER BY name`)
 	if err != nil {
@@ -85,9 +85,9 @@ func (s *postgresStore) ListItems(ctx context.Context) ([]item, error) {
 	}
 	defer rows.Close()
 
-	out := []item{}
+	out := []Item{}
 	for rows.Next() {
-		var it item
+		var it Item
 		if err := rows.Scan(&it.ID, &it.Name, &it.Price, &it.Stock); err != nil {
 			return nil, err
 		}
@@ -96,14 +96,14 @@ func (s *postgresStore) ListItems(ctx context.Context) ([]item, error) {
 	return out, rows.Err()
 }
 
-func (s *postgresStore) CreateItem(ctx context.Context, it item) error {
+func (s *postgresStore) CreateItem(ctx context.Context, it Item) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO items (id, name, price_usdt, stock) VALUES ($1, $2, $3::numeric, $4)`,
 		it.ID, it.Name, it.Price, it.Stock)
 	return err
 }
 
-func (s *postgresStore) UpdateItem(ctx context.Context, id string, it item) error {
+func (s *postgresStore) UpdateItem(ctx context.Context, id string, it Item) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE items SET name = $1, price_usdt = $2::numeric, stock = $3 WHERE id = $4`,
 		it.Name, it.Price, it.Stock, id)
@@ -111,7 +111,7 @@ func (s *postgresStore) UpdateItem(ctx context.Context, id string, it item) erro
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return errNotFound
+		return ErrNotFound
 	}
 	return nil
 }
@@ -122,12 +122,12 @@ func (s *postgresStore) DeleteItem(ctx context.Context, id string) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return errNotFound
+		return ErrNotFound
 	}
 	return nil
 }
 
-func (s *postgresStore) ListOrders(ctx context.Context) ([]order, error) {
+func (s *postgresStore) ListOrders(ctx context.Context) ([]Order, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, buyer_wallet, tx_hash, amount_usdt::text, status,
 		        COALESCE(item_id, ''), COALESCE(item_quantity, 0), created_at
@@ -137,9 +137,9 @@ func (s *postgresStore) ListOrders(ctx context.Context) ([]order, error) {
 	}
 	defer rows.Close()
 
-	out := []order{}
+	out := []Order{}
 	for rows.Next() {
-		var o order
+		var o Order
 		if err := rows.Scan(&o.ID, &o.BuyerWallet, &o.TxHash, &o.AmountUSDT,
 			&o.Status, &o.ItemID, &o.ItemQuantity, &o.CreatedAt); err != nil {
 			return nil, err
@@ -149,8 +149,8 @@ func (s *postgresStore) ListOrders(ctx context.Context) ([]order, error) {
 	return out, rows.Err()
 }
 
-func (s *postgresStore) GetOrder(ctx context.Context, id string) (order, error) {
-	var o order
+func (s *postgresStore) GetOrder(ctx context.Context, id string) (Order, error) {
+	var o Order
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, buyer_wallet, tx_hash, amount_usdt::text, status,
 		        COALESCE(item_id, ''), COALESCE(item_quantity, 0), created_at
@@ -158,7 +158,7 @@ func (s *postgresStore) GetOrder(ctx context.Context, id string) (order, error) 
 		Scan(&o.ID, &o.BuyerWallet, &o.TxHash, &o.AmountUSDT,
 			&o.Status, &o.ItemID, &o.ItemQuantity, &o.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return order{}, errNotFound
+		return Order{}, ErrNotFound
 	}
 	return o, err
 }
@@ -168,10 +168,10 @@ func (s *postgresStore) GetOrder(ctx context.Context, id string) (order, error) 
 // buyers can never reserve the same units (no oversell). RETURNING hands back
 // the stored price so the order amount is computed server-side (price × qty);
 // the client-supplied amount is never trusted.
-func (s *postgresStore) CreateOrder(ctx context.Context, o order) (order, error) {
+func (s *postgresStore) CreateOrder(ctx context.Context, o Order) (Order, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return order{}, err
+		return Order{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -184,26 +184,26 @@ func (s *postgresStore) CreateOrder(ctx context.Context, o order) (order, error)
 		var exists bool
 		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM items WHERE id = $1)`, o.ItemID).Scan(&exists); err != nil {
-			return order{}, err
+			return Order{}, err
 		}
 		if !exists {
-			return order{}, errNotFound
+			return Order{}, ErrNotFound
 		}
-		return order{}, errInsufficientStock
+		return Order{}, ErrInsufficientStock
 	}
 	if err != nil {
-		return order{}, err
+		return Order{}, err
 	}
 
-	if o.AmountUSDT, err = orderTotal(price, o.ItemQuantity); err != nil {
-		return order{}, err
+	if o.AmountUSDT, err = OrderTotal(price, o.ItemQuantity); err != nil {
+		return Order{}, err
 	}
 	o.Status = "pending"
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO orders (id, buyer_wallet, tx_hash, amount_usdt, item_id, item_quantity, status)
 		 VALUES ($1, $2, $3, $4::numeric, $5, $6, 'pending') RETURNING created_at`,
 		o.ID, o.BuyerWallet, o.TxHash, o.AmountUSDT, o.ItemID, o.ItemQuantity).Scan(&o.CreatedAt); err != nil {
-		return order{}, err
+		return Order{}, err
 	}
 	return o, tx.Commit(ctx)
 }
@@ -218,7 +218,7 @@ func (s *postgresStore) SetOrderTx(ctx context.Context, orderID, txHash string) 
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return errNotFound
+		return ErrNotFound
 	}
 	return nil
 }
@@ -242,7 +242,7 @@ func (s *postgresStore) ListActiveAmountsForTx(ctx context.Context, txHash strin
 	return out, rows.Err()
 }
 
-func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, error) {
+func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]PendingOrder, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, COALESCE(tx_hash, ''), amount_usdt::text, COALESCE(item_id, ''),
 		        COALESCE(item_quantity, 0), created_at
@@ -252,10 +252,10 @@ func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]pendingOrder, 
 	}
 	defer rows.Close()
 
-	var out []pendingOrder
+	var out []PendingOrder
 	for rows.Next() {
-		var o pendingOrder
-		if err := rows.Scan(&o.id, &o.txHash, &o.amount, &o.itemID, &o.qty, &o.createdAt); err != nil {
+		var o PendingOrder
+		if err := rows.Scan(&o.ID, &o.TxHash, &o.Amount, &o.ItemID, &o.Qty, &o.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
