@@ -72,7 +72,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, { headers, ...init });
   if (!res.ok) {
     const body = await res.text();
-    throw new ApiError(res.status, `${res.status} ${res.statusText}: ${body}`);
+    // Backend errors are {"error": "..."}; surface that clean message when present,
+    // falling back to the raw body so nothing is ever swallowed.
+    let message = `${res.status} ${res.statusText}: ${body}`;
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed.error === 'string') {
+        message = parsed.error;
+      }
+    } catch {
+      // body wasn't JSON — keep the raw fallback
+    }
+    throw new ApiError(res.status, message);
   }
   if (res.status === 204) {
     return undefined as T;

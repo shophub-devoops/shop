@@ -19,6 +19,7 @@ import (
 var (
 	ErrNotFound          = errors.New("not found")
 	ErrInsufficientStock = errors.New("insufficient stock")
+	ErrAlreadyExists     = errors.New("already exists")
 )
 
 // Item is a catalogue entry. Prices travel as strings end-to-end (numeric in

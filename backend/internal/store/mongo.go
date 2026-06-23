@@ -74,6 +74,10 @@ func (s *mongoStore) ListItems(ctx context.Context) ([]Item, error) {
 
 func (s *mongoStore) CreateItem(ctx context.Context, it Item) error {
 	_, err := s.items.InsertOne(ctx, it)
+	// Duplicate _id (11000): an item with this id already exists.
+	if mongo.IsDuplicateKeyError(err) {
+		return ErrAlreadyExists
+	}
 	return err
 }
 
