@@ -3,7 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { LogOut, Package, Plus, Receipt, Trash2 } from 'lucide-react';
 import { adminToken, api, ApiError, fmtUsdt, type Item, type Order } from '../lib/api';
 
-const empty: Item = { id: '', name: '', price_usdt: '0', stock: 0 };
+// The add-item form is a draft where price and quantity are raw strings so the
+// inputs start empty (placeholders visible) instead of pre-filled with "0".
+type ItemDraft = { id: string; name: string; price_usdt: string; stock: string };
+const empty: ItemDraft = { id: '', name: '', price_usdt: '', stock: '' };
 
 function StatusBadge({ status }: { status: string }) {
   const tone =
@@ -18,7 +21,7 @@ function StatusBadge({ status }: { status: string }) {
 export default function AdminDashboard() {
   const [items, setItems] = useState<Item[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [draft, setDraft] = useState<Item>(empty);
+  const [draft, setDraft] = useState<ItemDraft>(empty);
   const [error, setError] = useState<string | null>(null);
   const nav = useNavigate();
 
@@ -29,7 +32,7 @@ export default function AdminDashboard() {
       nav('/admin/login');
       return;
     }
-    setError(String(e));
+    setError(e instanceof Error ? e.message : String(e));
   }
 
   function refresh() {
@@ -39,6 +42,15 @@ export default function AdminDashboard() {
 
   useEffect(refresh, []);
 
+  // Orders arrive asynchronously (buyer pays, backend confirms on-chain), so
+  // poll the list periodically instead of requiring a manual page refresh.
+  useEffect(() => {
+    const t = setInterval(() => {
+      api.listOrders().then(setOrders).catch(() => {});
+    }, 8000);
+    return () => clearInterval(t);
+  }, []);
+
   function signOut() {
     adminToken.clear();
     nav('/admin/login');
@@ -46,8 +58,19 @@ export default function AdminDashboard() {
 
   async function createItem(e: React.FormEvent) {
     e.preventDefault();
+    setError(null);
+    const price = Number(draft.price_usdt);
+    const stock = Number(draft.stock);
+    if (!Number.isFinite(price) || price < 0) {
+      setError('Price must be a non-negative number.');
+      return;
+    }
+    if (!Number.isInteger(stock) || stock < 0) {
+      setError('Quantity must be a non-negative whole number.');
+      return;
+    }
     try {
-      await api.createItem(draft);
+      await api.createItem({ id: draft.id, name: draft.name, price_usdt: draft.price_usdt, stock });
       setDraft(empty);
       refresh();
     } catch (e) {
@@ -56,6 +79,7 @@ export default function AdminDashboard() {
   }
 
   async function deleteItem(id: string) {
+    setError(null);
     try {
       await api.deleteItem(id);
       refresh();
@@ -93,8 +117,8 @@ export default function AdminDashboard() {
         <form onSubmit={createItem} className="mb-5 grid gap-2 sm:grid-cols-[1fr_1fr_1fr_90px_auto]">
           <input placeholder="id" value={draft.id} onChange={(e) => setDraft({ ...draft, id: e.target.value })} className={field} required />
           <input placeholder="name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className={field} required />
-          <input placeholder="price USDT" value={draft.price_usdt} onChange={(e) => setDraft({ ...draft, price_usdt: e.target.value })} className={field} required />
-          <input type="number" placeholder="stock" value={draft.stock} onChange={(e) => setDraft({ ...draft, stock: Number(e.target.value) })} className={field} required />
+          <input type="number" min="0" step="any" placeholder="price (USDT)" value={draft.price_usdt} onChange={(e) => setDraft({ ...draft, price_usdt: e.target.value })} className={field} required />
+          <input type="number" min="0" step="1" placeholder="quantity" value={draft.stock} onChange={(e) => setDraft({ ...draft, stock: e.target.value })} className={field} required />
           <button
             type="submit"
             className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-accent px-4 text-sm font-medium text-white transition-[filter] hover:brightness-110"

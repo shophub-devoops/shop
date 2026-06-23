@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -100,6 +101,11 @@ func (s *postgresStore) CreateItem(ctx context.Context, it Item) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO items (id, name, price_usdt, stock) VALUES ($1, $2, $3::numeric, $4)`,
 		it.ID, it.Name, it.Price, it.Stock)
+	// 23505 = unique_violation: an item with this id already exists.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return ErrAlreadyExists
+	}
 	return err
 }
 

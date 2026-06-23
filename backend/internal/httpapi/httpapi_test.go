@@ -131,6 +131,32 @@ func TestItemCRUD(t *testing.T) {
 	}
 }
 
+func TestCreateDuplicateItemReturns409(t *testing.T) {
+	r := BuildRouter(testStore, config.Config{TokenDecimals: 6})
+
+	it := store.Item{ID: "dup-1", Name: "Once", Price: "1.00", Stock: 1}
+	if w := do(r, http.MethodPost, "/api/items", it); w.Code != http.StatusCreated {
+		t.Fatalf("first create = %d", w.Code)
+	}
+	w := do(r, http.MethodPost, "/api/items", it)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("duplicate create = %d, want 409 (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateNegativeItemReturns400(t *testing.T) {
+	r := BuildRouter(testStore, config.Config{TokenDecimals: 6})
+
+	negStock := store.Item{ID: "neg-stock", Name: "Bad", Price: "1.00", Stock: -2}
+	if w := do(r, http.MethodPost, "/api/items", negStock); w.Code != http.StatusBadRequest {
+		t.Fatalf("negative stock = %d, want 400", w.Code)
+	}
+	negPrice := store.Item{ID: "neg-price", Name: "Bad", Price: "-0.5", Stock: 1}
+	if w := do(r, http.MethodPost, "/api/items", negPrice); w.Code != http.StatusBadRequest {
+		t.Fatalf("negative price = %d, want 400", w.Code)
+	}
+}
+
 func TestUpdateMissingItemReturns404(t *testing.T) {
 	r := BuildRouter(testStore, config.Config{TokenDecimals: 6})
 	upd := store.Item{Name: "Ghost", Price: "1.00", Stock: 1}
