@@ -27,6 +27,11 @@ type Config struct {
 	// AdminPassword guards item writes and order listing. Injected by the
 	// operator from the per-shop admin Secret; empty disables the gate (dev).
 	AdminPassword string
+
+	// DiscordWebhookURL receives order notifications (confirmed purchases).
+	// Injected by the operator from the shop's Discord webhook Secret when the
+	// shop has a Discord channel; empty disables notifications.
+	DiscordWebhookURL string
 }
 
 func Load() (Config, error) {
@@ -39,14 +44,15 @@ func Load() (Config, error) {
 		port = "8080"
 	}
 	cfg := Config{
-		Port:          port,
-		DatabaseURL:   dbURL,
-		DBName:        os.Getenv("SHOP_DB_NAME"),
-		WalletAddress: os.Getenv("WALLET_ADDRESS"),
-		RPCURL:        EnvOr("SEPOLIA_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
-		TokenContract: EnvOr("USDT_CONTRACT", "0x74b0ef872a9f1a4bbb07a01a6b4376379737ff6f"),
-		TokenDecimals: 6,
-		AdminPassword: os.Getenv("ADMIN_PASSWORD"),
+		Port:              port,
+		DatabaseURL:       dbURL,
+		DBName:            os.Getenv("SHOP_DB_NAME"),
+		WalletAddress:     os.Getenv("WALLET_ADDRESS"),
+		RPCURL:            EnvOr("SEPOLIA_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
+		TokenContract:     EnvOr("USDT_CONTRACT", "0x74b0ef872a9f1a4bbb07a01a6b4376379737ff6f"),
+		TokenDecimals:     6,
+		AdminPassword:     os.Getenv("ADMIN_PASSWORD"),
+		DiscordWebhookURL: os.Getenv("DISCORD_WEBHOOK_URL"),
 	}
 	if d := os.Getenv("USDT_DECIMALS"); d != "" {
 		n, err := strconv.Atoi(d)

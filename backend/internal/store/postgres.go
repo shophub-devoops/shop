@@ -271,12 +271,16 @@ func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]PendingOrder, 
 
 // ConfirmOrder flips the order out of 'pending' with a conditional UPDATE so
 // concurrent replica sweeps confirm exactly once. Stock was already reserved
-// when the order was created.
-func (s *postgresStore) ConfirmOrder(ctx context.Context, orderID string) error {
-	_, err := s.pool.Exec(ctx,
+// when the order was created. RowsAffected reports whether this call claimed
+// the order (false = another sweep already did).
+func (s *postgresStore) ConfirmOrder(ctx context.Context, orderID string) (bool, error) {
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE orders SET status = 'confirmed', verified_at = now()
 		 WHERE id = $1 AND status = 'pending'`, orderID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // FailOrder claims the pending order and restores its reserved stock in one

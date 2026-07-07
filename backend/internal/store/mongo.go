@@ -234,15 +234,19 @@ func (s *mongoStore) ListPendingOrders(ctx context.Context) ([]PendingOrder, err
 
 // ConfirmOrder flips the order out of 'pending' with a conditional update so
 // concurrent replica sweeps confirm exactly once. Stock was already reserved
-// when the order was created.
-func (s *mongoStore) ConfirmOrder(ctx context.Context, orderID string) error {
+// when the order was created. Returns whether this call claimed the order
+// (false = another sweep/replica already did).
+func (s *mongoStore) ConfirmOrder(ctx context.Context, orderID string) (bool, error) {
 	claim := s.orders.FindOneAndUpdate(ctx,
 		bson.M{"_id": orderID, "status": "pending"},
 		bson.M{"$set": bson.M{"status": "confirmed", "verified_at": time.Now()}})
 	if errors.Is(claim.Err(), mongo.ErrNoDocuments) {
-		return nil // already handled by another sweep/replica
+		return false, nil // already handled by another sweep/replica
 	}
-	return claim.Err()
+	if claim.Err() != nil {
+		return false, claim.Err()
+	}
+	return true, nil
 }
 
 // FailOrder claims the pending order with a conditional update, then restores
