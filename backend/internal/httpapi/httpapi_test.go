@@ -236,8 +236,13 @@ func TestConfirmIsIdempotent(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		if err := testStore.ConfirmOrder(ctx, "idem-order"); err != nil {
+		claimed, err := testStore.ConfirmOrder(ctx, "idem-order")
+		if err != nil {
 			t.Fatalf("confirm #%d: %v", i, err)
+		}
+		// Only the first call claims the order (exactly-once side effects).
+		if want := i == 0; claimed != want {
+			t.Fatalf("confirm #%d: claimed = %v, want %v", i, claimed, want)
 		}
 	}
 

@@ -92,10 +92,15 @@ func TestMongoStore(t *testing.T) {
 		t.Fatalf("pending = %+v, err %v", pending, err)
 	}
 
-	// ConfirmOrder is idempotent and never touches stock again.
+	// ConfirmOrder is idempotent and never touches stock again; only the first
+	// call claims the order (exactly-once side effects).
 	for i := 0; i < 3; i++ {
-		if err := st.ConfirmOrder(ctx, "ord-ok"); err != nil {
+		claimed, err := st.ConfirmOrder(ctx, "ord-ok")
+		if err != nil {
 			t.Fatalf("confirm #%d: %v", i, err)
+		}
+		if want := i == 0; claimed != want {
+			t.Fatalf("confirm #%d: claimed = %v, want %v", i, claimed, want)
 		}
 	}
 	if o, _ := st.GetOrder(ctx, "ord-ok"); o.Status != "confirmed" {

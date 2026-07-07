@@ -2,10 +2,12 @@ package payment
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"time"
 
+	"github.com/shophub-devoops/shop/backend/internal/notify"
 	"github.com/shophub-devoops/shop/backend/internal/store"
 )
 
@@ -25,6 +27,11 @@ type PaymentVerifier struct {
 	Store    store.Store
 	V        *Verifier
 	Decimals int
+	// Notify posts a message to the shop's Discord channel when an order is
+	// confirmed. Nil when DISCORD_WEBHOOK_URL is not injected (shop without a
+	// Discord channel) — notifications are then skipped. ConfirmOrder's claim
+	// semantics guarantee the message is sent once even with multiple replicas.
+	Notify *notify.Discord
 }
 
 func (p *PaymentVerifier) Run(ctx context.Context) {
@@ -75,10 +82,12 @@ func (p *PaymentVerifier) sweep(ctx context.Context) {
 		}
 		switch st {
 		case statusConfirmed:
-			if err := p.Store.ConfirmOrder(ctx, o.ID); err != nil {
+			claimed, err := p.Store.ConfirmOrder(ctx, o.ID)
+			if err != nil {
 				slog.Error("confirm order", "order", o.ID, "err", err)
-			} else {
+			} else if claimed {
 				slog.Info("order confirmed", "order", o.ID, "tx", o.TxHash)
+				p.notifyConfirmed(ctx, o)
 			}
 		case statusFailed:
 			if err := p.Store.FailOrder(ctx, o.ID, o.ItemID, o.Qty); err != nil {
@@ -108,4 +117,18 @@ func (p *PaymentVerifier) RequiredForTx(ctx context.Context, txHash string) (*bi
 		total.Add(total, v)
 	}
 	return total, nil
+}
+
+// notifyConfirmed posts the confirmed order to the shop's Discord channel.
+// Best-effort: a Discord hiccup must not affect order settlement, so failures
+// are only logged.
+func (p *PaymentVerifier) notifyConfirmed(ctx context.Context, o store.PendingOrder) {
+	if p.Notify == nil {
+		return
+	}
+	msg := fmt.Sprintf("🛒 New order confirmed: %d× %s — %s USDT (order %s)",
+		o.Qty, o.ItemID, o.Amount, o.ID)
+	if err := p.Notify.Send(ctx, msg); err != nil {
+		slog.Warn("discord order notification failed", "order", o.ID, "err", err)
+	}
 }

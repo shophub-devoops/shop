@@ -88,8 +88,10 @@ type Store interface {
 
 	ListPendingOrders(ctx context.Context) ([]PendingOrder, error)
 	// ConfirmOrder flips a pending order to confirmed exactly once, even across
-	// concurrent replicas. Stock was already reserved at creation.
-	ConfirmOrder(ctx context.Context, orderID string) error
+	// concurrent replicas. Stock was already reserved at creation. Returns true
+	// only for the call that claimed the order, so side effects (the Discord
+	// order notification) fire exactly once cluster-wide.
+	ConfirmOrder(ctx context.Context, orderID string) (bool, error)
 	// FailOrder flips a pending order to failed and restores its reserved stock
 	// exactly once (the status claim guards against double-restores).
 	FailOrder(ctx context.Context, orderID, itemID string, qty int) error

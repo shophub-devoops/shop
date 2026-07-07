@@ -16,6 +16,7 @@ import (
 
 	"github.com/shophub-devoops/shop/backend/internal/config"
 	"github.com/shophub-devoops/shop/backend/internal/httpapi"
+	"github.com/shophub-devoops/shop/backend/internal/notify"
 	"github.com/shophub-devoops/shop/backend/internal/observability"
 	"github.com/shophub-devoops/shop/backend/internal/payment"
 	"github.com/shophub-devoops/shop/backend/internal/store"
@@ -55,7 +56,13 @@ func main() {
 	if err != nil {
 		slog.Warn("on-chain verification disabled (sweep runs expiry-only)", "err", err)
 	}
-	go (&payment.PaymentVerifier{Store: st, V: v, Decimals: cfg.TokenDecimals}).Run(verifierCtx)
+	go (&payment.PaymentVerifier{
+		Store:    st,
+		V:        v,
+		Decimals: cfg.TokenDecimals,
+		// nil when the shop has no Discord channel — notifications are skipped.
+		Notify: notify.NewDiscord(cfg.DiscordWebhookURL),
+	}).Run(verifierCtx)
 
 	shutdownTracing, err := observability.InitTracing(context.Background())
 	if err != nil {
