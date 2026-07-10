@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { parseUnits } from 'ethers';
 import { Search, ShoppingCart, Trash2, Wallet } from 'lucide-react';
 import { api, fmtUsdt, type Item } from '../lib/api';
-import { connectWallet, payUSDT } from '../lib/web3';
+import { connectWallet, switchAccount, onAccountsChanged, payUSDT } from '../lib/web3';
 
 // PaymentFlow shows the order status, and while the payment is in flight it
 // streams little coins from "You" to "Shop" — a small visual cue that funds are
@@ -40,6 +40,10 @@ export default function Storefront() {
   useEffect(() => {
     api.listItems().then(setItems).catch((e) => setError(String(e)));
   }, []);
+
+  // Follow account switches made from within MetaMask so the connected chip and
+  // the paying account stay in sync with the wallet.
+  useEffect(() => onAccountsChanged(setAccount), []);
 
   const byId = useMemo(() => Object.fromEntries(items.map((it) => [it.id, it])), [items]);
 
@@ -83,6 +87,17 @@ export default function Storefront() {
   async function connect() {
     try {
       setAccount(await connectWallet());
+      setStatus(null);
+    } catch (e) {
+      setStatus((e as Error).message);
+    }
+  }
+
+  // changeAccount opens MetaMask's picker so the buyer can pay from a different
+  // account (e.g. one that isn't the shop's own payout wallet).
+  async function changeAccount() {
+    try {
+      setAccount(await switchAccount());
       setStatus(null);
     } catch (e) {
       setStatus((e as Error).message);
@@ -167,10 +182,19 @@ export default function Storefront() {
           <p className="mt-1 text-sm text-muted">Browse, add to cart, and pay with USDT on Sepolia.</p>
         </div>
         {account ? (
-          <span className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-card px-3 py-1.5 text-xs text-muted">
-            <Wallet size={13} className="text-accent-bright" />
-            {account.slice(0, 6)}…{account.slice(-4)}
-          </span>
+          <div className="inline-flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-card px-3 py-1.5 text-xs text-muted">
+              <Wallet size={13} className="text-accent-bright" />
+              {account.slice(0, 6)}…{account.slice(-4)}
+            </span>
+            <button
+              onClick={changeAccount}
+              className="rounded-lg border border-line bg-card px-3 py-1.5 text-xs text-muted transition-colors hover:border-white/20 hover:text-fg"
+              title="Pay from a different wallet account"
+            >
+              Change
+            </button>
+          </div>
         ) : (
           <button
             onClick={connect}
