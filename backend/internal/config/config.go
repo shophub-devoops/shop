@@ -1,6 +1,3 @@
-// Package config loads the Shop backend's runtime configuration from the
-// environment. The operator injects most of these (DATABASE_URL, WALLET_ADDRESS,
-// ADMIN_PASSWORD, …); the rest default to the project's Sepolia test setup.
 package config
 
 import (
@@ -12,25 +9,13 @@ import (
 type Config struct {
 	Port        string
 	DatabaseURL string
-	// DBName is the database the Mongo client uses (operator injects SHOP_DB_NAME
-	// = shop name). Ignored by Postgres, whose URI already names the database.
-	DBName string
-
-	// Web3 payment (D12). WalletAddress is this shop's on-chain recipient — the
-	// operator injects it from Shop.spec.walletAddress. Token/RPC default to the
-	// project's Sepolia test setup and can be overridden by env.
-	WalletAddress string
-	RPCURL        string
-	TokenContract string
-	TokenDecimals int
-
-	// AdminPassword guards item writes and order listing. Injected by the
-	// operator from the per-shop admin Secret; empty disables the gate (dev).
-	AdminPassword string
-
-	// DiscordWebhookURL receives order notifications (confirmed purchases).
-	// Injected by the operator from the shop's Discord webhook Secret when the
-	// shop has a Discord channel; empty disables notifications.
+	// postgress ne gleda ima jer ga vec sadrdzi u uriju
+	DBName            string
+	WalletAddress     string
+	RPCURL            string
+	TokenContract     string
+	TokenDecimals     int
+	AdminPassword     string
 	DiscordWebhookURL string
 }
 
@@ -64,7 +49,6 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// EnvOr returns the value of key, or fallback when it is unset/empty.
 func EnvOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

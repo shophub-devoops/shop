@@ -7,10 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RequestLogger emits one structured log line per request. It records the raw
-// URL path for unmatched routes (real 404s) so Loki shows which endpoint was
-// hit (spec 4.1: 404s with their endpoints), and the user agent so unique
-// visitors can be counted as distinct (client_ip, user_agent) pairs.
+// emituje se jedna strukturisana log linija po zahtevu (za Loki)
 func RequestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()

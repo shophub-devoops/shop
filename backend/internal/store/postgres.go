@@ -11,9 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// postgresStore is the CNPG / "standard" database implementation of Store.
 type postgresStore struct {
-	pool *pgxpool.Pool
+	pool *pgxpool.Pool // ne otvara novu konekciju stalno, nego ima pool
 }
 
 func newPostgresStore(ctx context.Context, dsn string) (*postgresStore, error) {
@@ -40,16 +39,15 @@ func newPostgresStore(ctx context.Context, dsn string) (*postgresStore, error) {
 
 func (s *postgresStore) Close() { s.pool.Close() }
 
+// za readiness probe
 func (s *postgresStore) Ping(ctx context.Context) error {
 	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	return s.pool.Ping(pingCtx)
 }
 
-// EnsureSchema creates the application tables and adds the D12 payment columns
-// idempotently. The operator seeds base tables via CNPG postInitApplicationSQL
-// only on first bootstrap, so running this on every start lets existing shops
-// pick up new columns in place.
+// idempotentne migracije, sve je if not exist, to je bitno jer se kolone status i verified
+// tek kasnije popune
 func (s *postgresStore) EnsureSchema(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS items (
@@ -101,7 +99,7 @@ func (s *postgresStore) CreateItem(ctx context.Context, it Item) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO items (id, name, price_usdt, stock) VALUES ($1, $2, $3::numeric, $4)`,
 		it.ID, it.Name, it.Price, it.Stock)
-	// 23505 = unique_violation: an item with this id already exists.
+	// 23505 = unique_violation: vec postoji item sa istim id-jem
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return ErrAlreadyExists
@@ -169,33 +167,29 @@ func (s *postgresStore) GetOrder(ctx context.Context, id string) (Order, error) 
 	return o, err
 }
 
-// CreateOrder reserves stock and records the pending order in one transaction:
-// the guarded UPDATE only matches when enough stock remains, so two concurrent
-// buyers can never reserve the same units (no oversell). RETURNING hands back
-// the stored price so the order amount is computed server-side (price × qty);
-// the client-supplied amount is never trusted.
+// rezervise i zabelezi order u jednoj transakciji, neda dvojici da se zaglave
 func (s *postgresStore) CreateOrder(ctx context.Context, o Order) (Order, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Order{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = tx.Rollback(ctx) }() // ako se ne comitu-uje sve se ponisti
 
-	var price string
-	err = tx.QueryRow(ctx,
+	var price string       // ovde radimo onaj guarded decrement
+	err = tx.QueryRow(ctx, // where uslov, samo ako ima dovoljno, where je atomski u bazi
 		`UPDATE items SET stock = stock - $1 WHERE id = $2 AND stock >= $1 RETURNING price_usdt::text`,
-		o.ItemQuantity, o.ItemID).Scan(&price)
+		o.ItemQuantity, o.ItemID).Scan(&price) // cena se cita iz baze a ne iz requesta, da nema prevare
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Either the item doesn't exist or there isn't enough stock.
+		// ili item ne postoji ili ga nema dovoljno, proveri koji je slucaj
 		var exists bool
 		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM items WHERE id = $1)`, o.ItemID).Scan(&exists); err != nil {
 			return Order{}, err
 		}
 		if !exists {
-			return Order{}, ErrNotFound
+			return Order{}, ErrNotFound // ako ne postoji
 		}
-		return Order{}, ErrInsufficientStock
+		return Order{}, ErrInsufficientStock // ako ga nema dovoljno
 	}
 	if err != nil {
 		return Order{}, err
@@ -214,8 +208,7 @@ func (s *postgresStore) CreateOrder(ctx context.Context, o Order) (Order, error)
 	return o, tx.Commit(ctx)
 }
 
-// SetOrderTx is conditional on "pending and unpaid" so a hash can be attached
-// exactly once — a second attempt (or an attempt on a settled order) is a 404.
+// ako je pending i nemamo hash samo onda mozemo da zakacimo hash
 func (s *postgresStore) SetOrderTx(ctx context.Context, orderID, txHash string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE orders SET tx_hash = $1 WHERE id = $2 AND status = 'pending' AND tx_hash IS NULL`,
@@ -229,6 +222,7 @@ func (s *postgresStore) SetOrderTx(ctx context.Context, orderID, txHash string) 
 	return nil
 }
 
+// za slucaj da niko ne preda isti hash na 2 porudzbine, zbir sa tog hashsa mora da se poklapa
 func (s *postgresStore) ListActiveAmountsForTx(ctx context.Context, txHash string) ([]string, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT amount_usdt::text FROM orders WHERE tx_hash = $1 AND status <> 'failed'`, txHash)
@@ -269,10 +263,7 @@ func (s *postgresStore) ListPendingOrders(ctx context.Context) ([]PendingOrder, 
 	return out, rows.Err()
 }
 
-// ConfirmOrder flips the order out of 'pending' with a conditional UPDATE so
-// concurrent replica sweeps confirm exactly once. Stock was already reserved
-// when the order was created. RowsAffected reports whether this call claimed
-// the order (false = another sweep already did).
+// iz pending u confirmed
 func (s *postgresStore) ConfirmOrder(ctx context.Context, orderID string) (bool, error) {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE orders SET status = 'confirmed', verified_at = now()
@@ -283,9 +274,7 @@ func (s *postgresStore) ConfirmOrder(ctx context.Context, orderID string) (bool,
 	return tag.RowsAffected() == 1, nil
 }
 
-// FailOrder claims the pending order and restores its reserved stock in one
-// transaction. The conditional claim means a concurrent sweep can't restore
-// the same reservation twice.
+// iz pending u failed
 func (s *postgresStore) FailOrder(ctx context.Context, orderID, itemID string, qty int) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

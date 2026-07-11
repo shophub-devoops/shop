@@ -9,9 +9,7 @@ jobs:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
       - uses: wagoid/commitlint-github-action@v6
-  # Squash-merge uses the PR title as the commit subject on main, so the title
-  # must follow Conventional Commits too — commitlint above only checks the
-  # branch commits, which lets a non-conforming title slip through.
+
   pr-title:
     runs-on: ubuntu-latest
     permissions:
