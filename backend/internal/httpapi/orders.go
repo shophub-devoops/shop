@@ -20,8 +20,6 @@ func listOrders(s store.Store) gin.HandlerFunc {
 	}
 }
 
-// getOrder returns a single order so the frontend can poll its payment status
-// (pending -> confirmed/failed).
 func getOrder(s store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		o, err := s.GetOrder(c.Request.Context(), c.Param("id"))
@@ -41,11 +39,6 @@ type attachTxRequest struct {
 	TxHash string `json:"tx_hash" binding:"required"`
 }
 
-// attachOrderTx records the payment transaction for a pending, unpaid order.
-// The storefront creates orders first (reserving stock), then pays, then
-// attaches the resulting hash here for the background verifier to confirm.
-// The conditional store update makes the attach one-shot: a settled or
-// already-paid order cannot have its hash swapped.
 func attachOrderTx(s store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var in attachTxRequest
@@ -66,9 +59,6 @@ func attachOrderTx(s store.Store) gin.HandlerFunc {
 	}
 }
 
-// createOrder records a pending order. tx_hash may be empty here; Web3 payment
-// verification (D12) confirms it later via the background sweep once MetaMask
-// returns a hash to the frontend.
 func createOrder(s store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var in store.Order

@@ -14,24 +14,17 @@ import (
 
 const adminTokenTTL = 24 * time.Hour
 
-// adminAuth guards the shop-owner endpoints (item writes, order listing).
-// The operator provisions a per-shop admin password Secret and injects it as
-// ADMIN_PASSWORD; a successful login returns a JWT signed with a key derived
-// from that password, so any replica can verify tokens without shared state.
-// A nil adminAuth (ADMIN_PASSWORD unset — local dev, tests) disables the gate.
+// jwt kljuc za potpis se izvede iz admin lozinke, lozinka je i identitet i osnova za potpis tokena
 type adminAuth struct {
 	password string
 	key      []byte
 }
 
-// NewAdminAuth returns a gate for the given password, or nil (pass-through) when
-// the password is empty.
 func NewAdminAuth(password string) *adminAuth {
-	if password == "" {
+	if password == "" { // no-op pattern
 		return nil
 	}
-	// Derive the JWT signing key from the password so no second secret needs
-	// to be provisioned; the prefix domain-separates it from other HMAC uses.
+	// vadi kljuc iz lozinke
 	sum := sha256.Sum256([]byte("shop-admin-jwt:" + password))
 	return &adminAuth{password: password, key: sum[:]}
 }
@@ -40,9 +33,6 @@ type adminLoginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
-// adminLogin exchanges the shop's admin password for a bearer token. When auth
-// is disabled (no ADMIN_PASSWORD) any password yields a dummy token so the
-// admin UI flow still works in local dev.
 func adminLogin(a *adminAuth) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var in adminLoginRequest
@@ -54,6 +44,8 @@ func adminLogin(a *adminAuth) gin.HandlerFunc {
 			c.JSON(http.StatusOK, gin.H{"token": "dev-mode"})
 			return
 		}
+		// constant time uvek traje isto, ne dozvoljava hakeru da na osnovu vremenu odgovora
+		// skonta koji karakter je netacan u passwordu i da ga probije na brute force
 		if subtle.ConstantTimeCompare([]byte(in.Password), []byte(a.password)) != 1 {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
 			return
@@ -72,12 +64,10 @@ func adminLogin(a *adminAuth) gin.HandlerFunc {
 	}
 }
 
-// require rejects requests without a valid admin bearer token. A nil receiver
-// is a pass-through so local dev and the handler tests run without auth.
 func (a *adminAuth) require() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if a == nil {
-			c.Next()
+			c.Next() // gate je iskljucen
 			return
 		}
 		raw, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
@@ -85,7 +75,7 @@ func (a *adminAuth) require() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
 			return
 		}
-		tok, err := jwt.Parse(raw, func(t *jwt.Token) (any, error) {
+		tok, err := jwt.Parse(raw, func(t *jwt.Token) (any, error) { // proveri potpis
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 			}

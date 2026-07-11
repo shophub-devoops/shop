@@ -1,5 +1,3 @@
-// Package observability holds the Shop backend's cross-cutting telemetry:
-// Prometheus metrics, structured request logging, and OTLP tracing.
 package observability
 
 import (
@@ -13,14 +11,14 @@ import (
 )
 
 var (
-	httpRequestsTotal = promauto.NewCounterVec(
+	httpRequestsTotal = promauto.NewCounterVec( // broj zahteva
 		prometheus.CounterOpts{
 			Name: "shop_http_requests_total",
 			Help: "Total HTTP requests received, partitioned by method, route and status.",
 		},
 		[]string{"method", "route", "status"},
 	)
-	httpRequestDuration = promauto.NewHistogramVec(
+	httpRequestDuration = promauto.NewHistogramVec( // histogram latencije
 		prometheus.HistogramOpts{
 			Name:    "shop_http_request_duration_seconds",
 			Help:    "HTTP request latency in seconds.",
@@ -28,7 +26,7 @@ var (
 		},
 		[]string{"method", "route"},
 	)
-	httpResponseBytes = promauto.NewCounterVec(
+	httpResponseBytes = promauto.NewCounterVec( // protok
 		prometheus.CounterOpts{
 			Name: "shop_http_response_bytes_total",
 			Help: "Total bytes written in HTTP response bodies, partitioned by method, route and status.",
@@ -37,18 +35,14 @@ var (
 	)
 )
 
-// Middleware records request count, latency and response bytes per route.
 func Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
-		c.Next()
-		route := c.FullPath()
+		c.Next()              // izvrsi handler
+		route := c.FullPath() // koja ruta je mathcovana
 		if route == "" {
-			// No matched route. For 404s use the raw request path so the
-			// dashboard's "404 endpoints" panel shows the actual endpoint
-			// (spec 4.1) — bounded enough since only misses hit this branch.
-			// Everything else (e.g. SPA fallback 200s) stays "unknown" to keep
-			// label cardinality down.
+			// ako nema matchovane rute onda je not found i belezino sirovu putanju
+			// da pokazemo sta je gadjano
 			if c.Writer.Status() == http.StatusNotFound {
 				route = c.Request.URL.Path
 			} else {
@@ -56,12 +50,9 @@ func Middleware() gin.HandlerFunc {
 			}
 		}
 		status := strconv.Itoa(c.Writer.Status())
-		httpRequestsTotal.WithLabelValues(c.Request.Method, route, status).Inc()
-		httpRequestDuration.WithLabelValues(c.Request.Method, route).Observe(time.Since(start).Seconds())
-		// Writer.Size() is -1 until a body is written (e.g. Gin's NoRoute 404
-		// writes its body after this middleware runs). Adding a negative value
-		// panics a Prometheus counter, so only record real, non-negative writes.
-		if size := c.Writer.Size(); size > 0 {
+		httpRequestsTotal.WithLabelValues(c.Request.Method, route, status).Inc()                          // inkrement
+		httpRequestDuration.WithLabelValues(c.Request.Method, route).Observe(time.Since(start).Seconds()) // trajanje
+		if size := c.Writer.Size(); size > 0 {                                                            // bajtovi
 			httpResponseBytes.WithLabelValues(c.Request.Method, route, status).Add(float64(size))
 		}
 	}

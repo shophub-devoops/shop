@@ -10,8 +10,6 @@ import (
 	"github.com/shophub-devoops/shop/backend/internal/store"
 )
 
-// validateItem rejects negative price or stock. Returns a human-readable
-// message (empty when valid) so the handler can answer 400 with it.
 func validateItem(it store.Item) string {
 	if it.Stock < 0 {
 		return "stock cannot be negative"

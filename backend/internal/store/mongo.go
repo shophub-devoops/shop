@@ -12,17 +12,14 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// mongoStore is the MongoDB community-operator / "light" database implementation
-// of Store. Items and orders map to two collections keyed by their id (_id);
-// the same Item/Order structs (bson-tagged) are persisted directly.
 type mongoStore struct {
 	client *mongo.Client
-	items  *mongo.Collection
+	items  *mongo.Collection // collection je mongova tabela
 	orders *mongo.Collection
 }
 
 func newMongoStore(ctx context.Context, dsn, dbName string) (*mongoStore, error) {
-	if dbName == "" {
+	if dbName == "" { // mongo trazi ima baze za razliku od sql-a koji ime nosi u uri-ju
 		return nil, fmt.Errorf("SHOP_DB_NAME is required for a mongodb DATABASE_URL")
 	}
 	client, err := mongo.Connect(options.Client().ApplyURI(dsn))
@@ -55,8 +52,8 @@ func (s *mongoStore) Ping(ctx context.Context) error {
 	return s.client.Ping(pingCtx, nil)
 }
 
-// EnsureSchema is a no-op: MongoDB creates collections lazily on first write and
-// items/orders are keyed by _id, so no DDL or index setup is required.
+// mongo nema semu, dokumenti nemaju fiksne kolone, nema create table nista se ne radi
+// kolekcije se samo prave pri prvom upisu
 func (s *mongoStore) EnsureSchema(_ context.Context) error { return nil }
 
 func (s *mongoStore) ListItems(ctx context.Context) ([]Item, error) {
@@ -74,7 +71,7 @@ func (s *mongoStore) ListItems(ctx context.Context) ([]Item, error) {
 
 func (s *mongoStore) CreateItem(ctx context.Context, it Item) error {
 	_, err := s.items.InsertOne(ctx, it)
-	// Duplicate _id (11000): an item with this id already exists.
+	// Duplicate _id (11000): vec postoji item sa istim id-jem
 	if mongo.IsDuplicateKeyError(err) {
 		return ErrAlreadyExists
 	}
@@ -129,18 +126,13 @@ func (s *mongoStore) GetOrder(ctx context.Context, id string) (Order, error) {
 	return o, err
 }
 
-// CreateOrder reserves stock with a guarded $inc (only matches when enough
-// stock remains — atomic on the replica set, so no oversell), then records the
-// pending order. If the insert fails the reservation is rolled back.
-// FindOneAndUpdate returns the matched item, whose stored price is used to
-// compute the order amount server-side (price × qty); the client-supplied
-// amount is never trusted.
+// guarded decrement
 func (s *mongoStore) CreateOrder(ctx context.Context, o Order) (Order, error) {
 	dec := s.items.FindOneAndUpdate(ctx,
-		bson.M{"_id": o.ItemID, "stock": bson.M{"$gte": o.ItemQuantity}},
-		bson.M{"$inc": bson.M{"stock": -o.ItemQuantity}})
+		bson.M{"_id": o.ItemID, "stock": bson.M{"$gte": o.ItemQuantity}}, // ako ima dovoljno
+		bson.M{"$inc": bson.M{"stock": -o.ItemQuantity}})                 // oduzmi quantity od stock-a
 	if errors.Is(dec.Err(), mongo.ErrNoDocuments) {
-		// Either the item doesn't exist or there isn't enough stock.
+		// il ne postoji ili nema dovoljno u stock-u
 		err := s.items.FindOne(ctx, bson.M{"_id": o.ItemID}).Err()
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return Order{}, ErrNotFound
@@ -156,7 +148,7 @@ func (s *mongoStore) CreateOrder(ctx context.Context, o Order) (Order, error) {
 
 	var it Item
 	if err := dec.Decode(&it); err != nil {
-		// Roll the reservation back so a failed decode doesn't leak stock.
+		// rollback rucno ako je failed decode, mongo update je ATOMSKI
 		_, _ = s.items.UpdateByID(ctx, o.ItemID, bson.M{"$inc": bson.M{"stock": o.ItemQuantity}})
 		return Order{}, err
 	}
@@ -170,16 +162,14 @@ func (s *mongoStore) CreateOrder(ctx context.Context, o Order) (Order, error) {
 	o.Status = "pending"
 	o.CreatedAt = time.Now()
 	if _, err := s.orders.InsertOne(ctx, o); err != nil {
-		// Roll the reservation back so a failed insert doesn't leak stock.
+		// ako insert ordera pukne posle rezervacije rollback rucno radimo da vratimo stock
 		_, _ = s.items.UpdateByID(ctx, o.ItemID, bson.M{"$inc": bson.M{"stock": o.ItemQuantity}})
 		return Order{}, err
-	}
+	} // svaki moguci fail posle rezervacije vraca stock, to je rucna transakcija,
 	return o, nil
 }
 
-// SetOrderTx is conditional on "pending and unpaid" so a hash can be attached
-// exactly once — a second attempt (or an attempt on a settled order) is a 404.
-// "tx_hash": nil matches both a null and a missing field.
+// hash se postavlja samo jednom
 func (s *mongoStore) SetOrderTx(ctx context.Context, orderID, txHash string) error {
 	res, err := s.orders.UpdateOne(ctx,
 		bson.M{"_id": orderID, "status": "pending", "tx_hash": nil},
@@ -232,16 +222,12 @@ func (s *mongoStore) ListPendingOrders(ctx context.Context) ([]PendingOrder, err
 	return out, nil
 }
 
-// ConfirmOrder flips the order out of 'pending' with a conditional update so
-// concurrent replica sweeps confirm exactly once. Stock was already reserved
-// when the order was created. Returns whether this call claimed the order
-// (false = another sweep/replica already did).
 func (s *mongoStore) ConfirmOrder(ctx context.Context, orderID string) (bool, error) {
 	claim := s.orders.FindOneAndUpdate(ctx,
 		bson.M{"_id": orderID, "status": "pending"},
 		bson.M{"$set": bson.M{"status": "confirmed", "verified_at": time.Now()}})
 	if errors.Is(claim.Err(), mongo.ErrNoDocuments) {
-		return false, nil // already handled by another sweep/replica
+		return false, nil
 	}
 	if claim.Err() != nil {
 		return false, claim.Err()
@@ -249,15 +235,12 @@ func (s *mongoStore) ConfirmOrder(ctx context.Context, orderID string) (bool, er
 	return true, nil
 }
 
-// FailOrder claims the pending order with a conditional update, then restores
-// its reserved stock. The claim guards against a concurrent sweep restoring
-// the same reservation twice.
 func (s *mongoStore) FailOrder(ctx context.Context, orderID, itemID string, qty int) error {
 	claim := s.orders.FindOneAndUpdate(ctx,
 		bson.M{"_id": orderID, "status": "pending"},
 		bson.M{"$set": bson.M{"status": "failed"}})
 	if errors.Is(claim.Err(), mongo.ErrNoDocuments) {
-		return nil // already handled by another sweep/replica
+		return nil
 	}
 	if claim.Err() != nil {
 		return claim.Err()

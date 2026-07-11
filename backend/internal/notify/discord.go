@@ -1,6 +1,3 @@
-// Package notify posts business notifications (confirmed orders) to the shop's
-// Discord channel via the webhook URL the operator injects as
-// DISCORD_WEBHOOK_URL — the same webhook the shop's Alertmanager alerts use.
 package notify
 
 import (
@@ -12,14 +9,12 @@ import (
 	"time"
 )
 
-// Discord posts messages to a single Discord webhook.
 type Discord struct {
 	webhookURL string
 	http       *http.Client
 }
 
-// NewDiscord returns nil when webhookURL is empty (notifications disabled), so
-// callers can keep a nil-checked field instead of a feature flag.
+// mini http klijent za slanje poruke na discord o order notifikaciji
 func NewDiscord(webhookURL string) *Discord {
 	if webhookURL == "" {
 		return nil
@@ -30,7 +25,7 @@ func NewDiscord(webhookURL string) *Discord {
 	}
 }
 
-// Send posts a plain content message to the webhook.
+// samo obican discord post za porukom o orderu
 func (d *Discord) Send(ctx context.Context, content string) error {
 	body, err := json.Marshal(map[string]string{"content": content})
 	if err != nil {
